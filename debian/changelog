@@ -1,3 +1,9 @@
+libpve-storage-perl (8.0.5-1) bookworm; urgency=medium
+
+  * remove ceph-fuse
+
+ -- Jiangcuo <jiangcuo@bingsin.com>  Sun, 24 Dec 2023 12:00:59 +0000
+
 libpve-storage-perl (8.0.5) bookworm; urgency=medium
 
   * btrfs: fix calling parent create_base method in fall-back
