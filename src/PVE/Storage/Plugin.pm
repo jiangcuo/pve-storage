@@ -138,7 +138,10 @@ my $defaultData = {
 	type => { description => "Storage type." },
 	storage => get_standard_option('pve-storage-id',
 	    { completion => \&PVE::Storage::complete_storage }),
-	nodes => get_standard_option('pve-node-list', { optional => 1 }),
+	nodes => get_standard_option('pve-node-list', {
+	    description => "List of nodes for which the storage configuration applies.",
+	    optional => 1,
+	}),
 	content => {
 	    description => "Allowed content types.\n\nNOTE: the value " .
 		"'rootdir' is used for Containers, and value 'images' for VMs.\n",
@@ -167,7 +170,10 @@ my $defaultData = {
 	    default => "Unlimited for users with Datastore.Allocate privilege, 5 for other users",
 	},
 	shared => {
-	    description => "Mark storage as shared.",
+	    description => "Indicate that this is a single storage with the same contents on all "
+		."nodes (or all listed in the 'nodes' option). It will not make the contents of a "
+		."local storage automatically accessible to other nodes, it just marks an already "
+		."shared storage as such!",
 	    type => 'boolean',
 	    optional => 1,
 	},
@@ -313,7 +319,9 @@ PVE::JSONSchema::register_format('pve-storage-content', \&verify_content);
 sub verify_content {
     my ($ct, $noerr) = @_;
 
-    my $valid_content = valid_content_types('dir'); # dir includes all types
+    return $ct if $ct eq 'import';
+
+    my $valid_content = valid_content_types('dir'); # dir includes all other types
 
     if (!$valid_content->{$ct}) {
 	return undef if $noerr;
@@ -942,14 +950,21 @@ sub file_size_info {
     }
 
     my $json = '';
+    my $err_output = '';
     eval {
 	run_command(['/usr/bin/qemu-img', 'info', '--output=json', $filename],
 	    timeout => $timeout,
 	    outfunc => sub { $json .= shift },
-	    errfunc => sub { warn "$_[0]\n" }
+	    errfunc => sub { $err_output .= shift . "\n"},
 	);
     };
     warn $@ if $@;
+    if ($err_output) {
+	# if qemu did not output anything to stdout we die with stderr as an error
+	die $err_output if !$json;
+	# otherwise we warn about it and try to parse the json
+	warn $err_output;
+    }
 
     my $info = eval { decode_json($json) };
     if (my $err = $@) {
