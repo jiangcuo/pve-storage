@@ -205,6 +205,15 @@ my $defaultData = {
 	    format => 'pve-storage-options',
 	    optional => 1,
 	},
+	port => {
+	    description => "Use this port to connect to the storage instead of the default one (for"
+		." example, with PBS or ESXi). For NFS and CIFS, use the 'options' option to"
+		." configure the port via the mount options.",
+	    type => 'integer',
+	    minimum => 1,
+	    maximum => 65535,
+	    optional => 1,
+	},
     },
 };
 
@@ -974,15 +983,18 @@ sub file_size_info {
 
     my ($size, $format, $used, $parent) = $info->@{qw(virtual-size format actual-size backing-filename)};
 
-    ($size) = ($size =~ /^(\d+)$/) or die "size '$size' not an integer\n"; # untaint
+    ($size) = ($size =~ /^(\d+)$/); # untaint
+    die "size '$size' not an integer\n" if !defined($size);
     # coerce back from string
     $size = int($size);
-    ($used) = ($used =~ /^(\d+)$/) or die "used '$used' not an integer\n"; # untaint
+    ($used) = ($used =~ /^(\d+)$/); # untaint
+    die "used '$used' not an integer\n" if !defined($used);
     # coerce back from string
     $used = int($used);
-    ($format) = ($format =~ /^(\S+)$/) or die "format '$format' includes whitespace\n"; # untaint
+    ($format) = ($format =~ /^(\S+)$/); # untaint
+    die "format '$format' includes whitespace\n" if !defined($format);
     if (defined($parent)) {
-	($parent) = ($parent =~ /^(\S+)$/) or die "parent '$parent' includes whitespace\n"; # untaint
+	($parent) = ($parent =~ /^(\S+)$/); # untaint
     }
     return wantarray ? ($size, $format, $used, $parent, $st->ctime) : $size;
 }
@@ -1583,13 +1595,14 @@ sub read_common_header($) {
 # Export a volume into a file handle as a stream of desired format.
 sub volume_export {
     my ($class, $scfg, $storeid, $fh, $volname, $format, $snapshot, $base_snapshot, $with_snapshots) = @_;
+
+    my $err_msg = "volume export format $format not available for $class\n";
     if ($scfg->{path} && !defined($snapshot) && !defined($base_snapshot)) {
-	my $file = $class->path($scfg, $volname, $storeid)
-	    or goto unsupported;
+	my $file = $class->path($scfg, $volname, $storeid) or die $err_msg;
 	my ($size, $file_format) = file_size_info($file);
 
 	if ($format eq 'raw+size') {
-	    goto unsupported if $with_snapshots || $file_format eq 'subvol';
+	    die $err_msg if $with_snapshots || $file_format eq 'subvol';
 	    write_common_header($fh, $size);
 	    if ($file_format eq 'raw') {
 		run_command(['dd', "if=$file", "bs=4k", "status=progress"], output => '>&'.fileno($fh));
@@ -1600,20 +1613,19 @@ sub volume_export {
 	    return;
 	} elsif ($format =~ /^(qcow2|vmdk)\+size$/) {
 	    my $data_format = $1;
-	    goto unsupported if !$with_snapshots || $file_format ne $data_format;
+	    die $err_msg if !$with_snapshots || $file_format ne $data_format;
 	    write_common_header($fh, $size);
 	    run_command(['dd', "if=$file", "bs=4k", "status=progress"], output => '>&'.fileno($fh));
 	    return;
 	} elsif ($format eq 'tar+size') {
-	    goto unsupported if $file_format ne 'subvol';
+	    die $err_msg if $file_format ne 'subvol';
 	    write_common_header($fh, $size);
 	    run_command(['tar', @COMMON_TAR_FLAGS, '-cf', '-', '-C', $file, '.'],
 	                output => '>&'.fileno($fh));
 	    return;
 	}
     }
- unsupported:
-    die "volume export format $format not available for $class";
+    die $err_msg;
 }
 
 sub volume_export_formats {
