@@ -227,6 +227,7 @@ __PACKAGE__->register_method ({
 	    { subdir => 'content' },
 	    { subdir => 'download-url' },
 	    { subdir => 'file-restore' },
+	    { subdir => 'import-metadata' },
 	    { subdir => 'prunebackups' },
 	    { subdir => 'rrd' },
 	    { subdir => 'rrddata' },
@@ -466,9 +467,9 @@ __PACKAGE__->register_method ({
 	if ($node ne 'localhost' && $node ne PVE::INotify::nodename()) {
 	    my $remip = PVE::Cluster::remote_node_ip($node);
 
-	    my @ssh_options = ('-o', 'BatchMode=yes');
+	    my $ssh_options = PVE::SSHInfo::ssh_info_to_ssh_opts({ ip => $remip, name => $node });
 
-	    my @remcmd = ('/usr/bin/ssh', @ssh_options, $remip, '--');
+	    my @remcmd = ('/usr/bin/ssh', $ssh_options->@*, $remip, '--');
 
 	    eval { # activate remote storage
 		run_command([@remcmd, '/usr/sbin/pvesm', 'status', '--storage', $param->{storage}]);
@@ -480,7 +481,7 @@ __PACKAGE__->register_method ({
 		errmsg => "mkdir failed",
 	    );
  
-	    $cmd = ['/usr/bin/scp', @ssh_options, '-p', '--', $tmpfilename, "[$remip]:" . PVE::Tools::shell_quote($dest)];
+	    $cmd = ['/usr/bin/scp', $ssh_options->@*, '-p', '--', $tmpfilename, "[$remip]:" . PVE::Tools::shell_quote($dest)];
 
 	    $err_cleanup = sub { run_command([@remcmd, 'rm', '-f', '--', $dest]) };
 	} else {
@@ -546,9 +547,15 @@ __PACKAGE__->register_method({
     description => "Download templates and ISO images by using an URL.",
     proxyto => 'node',
     permissions => {
+	description => 'Requires allocation access on the storage and as this allows one to probe'
+	    .' the (local!) host network indirectly it also requires one of Sys.Modify on / (for'
+	    .' backwards compatibility) or the newer Sys.AccessNetwork privilege on the node.',
 	check => [ 'and',
 	    ['perm', '/storage/{storage}', [ 'Datastore.AllocateTemplate' ]],
-	    ['perm', '/', [ 'Sys.Audit', 'Sys.Modify' ]],
+	    [ 'or',
+		['perm', '/', [ 'Sys.Audit', 'Sys.Modify' ]],
+		['perm', '/nodes/{node}', [ 'Sys.AccessNetwork' ]],
+	    ],
 	],
     },
     protected => 1,
@@ -668,6 +675,116 @@ __PACKAGE__->register_method({
 	my $worker_id = PVE::Tools::encode_text($filename); # must not pass : or the like as w-ID
 
 	return $rpcenv->fork_worker('download', $worker_id, $user, $worker);
+    }});
+
+__PACKAGE__->register_method({
+    name => 'get_import_metadata',
+    path => '{storage}/import-metadata',
+    method => 'GET',
+    description =>
+	"Get the base parameters for creating a guest which imports data from a foreign importable"
+	." guest, like an ESXi VM",
+    proxyto => 'node',
+    permissions => {
+	description => "You need read access for the volume.",
+	user => 'all',
+    },
+    protected => 1,
+    parameters => {
+	additionalProperties => 0,
+	properties => {
+	    node => get_standard_option('pve-node'),
+	    storage => get_standard_option('pve-storage-id'),
+	    volume => {
+		description => "Volume identifier for the guest archive/entry.",
+		type => 'string',
+	    },
+	},
+    },
+    returns => {
+	type => "object",
+	description => 'Information about how to import a guest.',
+	additionalProperties => 0,
+	properties => {
+	    type => {
+		type => 'string',
+		enum => [ 'vm' ],
+		description => 'The type of guest this is going to produce.',
+	    },
+	    source => {
+		type => 'string',
+		enum => [ 'esxi' ],
+		description => 'The type of the import-source of this guest volume.',
+	    },
+	    'create-args' => {
+		type => 'object',
+		additionalProperties => 1,
+		description => 'Parameters which can be used in a call to create a VM or container.',
+	    },
+	    'disks' => {
+		type => 'object',
+		additionalProperties => 1,
+		optional => 1,
+		description => 'Recognised disk volumes as `$bus$id` => `$storeid:$path` map.',
+	    },
+	    'net' => {
+		type => 'object',
+		additionalProperties => 1,
+		optional => 1,
+		description => 'Recognised network interfaces as `net$id` => { ...params } object.',
+	    },
+	    'warnings' => {
+		type => 'array',
+		description => 'List of known issues that can affect the import of a guest.'
+		    .' Note that lack of warning does not imply that there cannot be any problems.',
+		optional => 1,
+		items => {
+		    type => "object",
+		    additionalProperties => 1,
+		    properties => {
+			'type' => {
+			    description => 'What this warning is about.',
+			    enum => [
+				'cdrom-image-ignored',
+				'efi-state-lost',
+				'guest-is-running',
+				'nvme-unsupported',
+				'ovmf-with-lsi-unsupported',
+				'serial-port-socket-only',
+			    ],
+			    type => 'string',
+			},
+			'key' => {
+			    description => 'Related subject (config) key of warning.',
+			    optional => 1,
+			    type => 'string',
+			},
+			'value' => {
+			    description => 'Related subject (config) value of warning.',
+			    optional => 1,
+			    type => 'string',
+			},
+		    },
+		},
+	    },
+	},
+    },
+    code => sub {
+	my ($param) = @_;
+
+	my $rpcenv = PVE::RPCEnvironment::get();
+	my $authuser = $rpcenv->get_user();
+
+	my ($storeid, $volume) = $param->@{qw(storage volume)};
+	my $volid = "$storeid:$volume";
+
+	my $cfg = PVE::Storage::config();
+
+	PVE::Storage::check_volume_access($rpcenv, $authuser, $cfg, undef, $volid);
+
+	return PVE::Tools::run_with_timeout(30, sub {
+	    return PVE::Storage::get_import_metadata($cfg, $volid);
+	});
     }});
 
 1;

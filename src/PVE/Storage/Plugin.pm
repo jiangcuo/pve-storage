@@ -138,7 +138,10 @@ my $defaultData = {
 	type => { description => "Storage type." },
 	storage => get_standard_option('pve-storage-id',
 	    { completion => \&PVE::Storage::complete_storage }),
-	nodes => get_standard_option('pve-node-list', { optional => 1 }),
+	nodes => get_standard_option('pve-node-list', {
+	    description => "List of nodes for which the storage configuration applies.",
+	    optional => 1,
+	}),
 	content => {
 	    description => "Allowed content types.\n\nNOTE: the value " .
 		"'rootdir' is used for Containers, and value 'images' for VMs.\n",
@@ -167,7 +170,10 @@ my $defaultData = {
 	    default => "Unlimited for users with Datastore.Allocate privilege, 5 for other users",
 	},
 	shared => {
-	    description => "Mark storage as shared.",
+	    description => "Indicate that this is a single storage with the same contents on all "
+		."nodes (or all listed in the 'nodes' option). It will not make the contents of a "
+		."local storage automatically accessible to other nodes, it just marks an already "
+		."shared storage as such!",
 	    type => 'boolean',
 	    optional => 1,
 	},
@@ -197,6 +203,15 @@ my $defaultData = {
 	    description => "NFS/CIFS mount options (see 'man nfs' or 'man mount.cifs')",
 	    type => 'string',
 	    format => 'pve-storage-options',
+	    optional => 1,
+	},
+	port => {
+	    description => "Use this port to connect to the storage instead of the default one (for"
+		." example, with PBS or ESXi). For NFS and CIFS, use the 'options' option to"
+		." configure the port via the mount options.",
+	    type => 'integer',
+	    minimum => 1,
+	    maximum => 65535,
 	    optional => 1,
 	},
     },
@@ -313,7 +328,9 @@ PVE::JSONSchema::register_format('pve-storage-content', \&verify_content);
 sub verify_content {
     my ($ct, $noerr) = @_;
 
-    my $valid_content = valid_content_types('dir'); # dir includes all types
+    return $ct if $ct eq 'import';
+
+    my $valid_content = valid_content_types('dir'); # dir includes all other types
 
     if (!$valid_content->{$ct}) {
 	return undef if $noerr;
@@ -942,14 +959,21 @@ sub file_size_info {
     }
 
     my $json = '';
+    my $err_output = '';
     eval {
 	run_command(['/usr/bin/qemu-img', 'info', '--output=json', $filename],
 	    timeout => $timeout,
 	    outfunc => sub { $json .= shift },
-	    errfunc => sub { warn "$_[0]\n" }
+	    errfunc => sub { $err_output .= shift . "\n"},
 	);
     };
     warn $@ if $@;
+    if ($err_output) {
+	# if qemu did not output anything to stdout we die with stderr as an error
+	die $err_output if !$json;
+	# otherwise we warn about it and try to parse the json
+	warn $err_output;
+    }
 
     my $info = eval { decode_json($json) };
     if (my $err = $@) {
@@ -959,15 +983,18 @@ sub file_size_info {
 
     my ($size, $format, $used, $parent) = $info->@{qw(virtual-size format actual-size backing-filename)};
 
-    ($size) = ($size =~ /^(\d+)$/) or die "size '$size' not an integer\n"; # untaint
+    ($size) = ($size =~ /^(\d+)$/); # untaint
+    die "size '$size' not an integer\n" if !defined($size);
     # coerce back from string
     $size = int($size);
-    ($used) = ($used =~ /^(\d+)$/) or die "used '$used' not an integer\n"; # untaint
+    ($used) = ($used =~ /^(\d+)$/); # untaint
+    die "used '$used' not an integer\n" if !defined($used);
     # coerce back from string
     $used = int($used);
-    ($format) = ($format =~ /^(\S+)$/) or die "format '$format' includes whitespace\n"; # untaint
+    ($format) = ($format =~ /^(\S+)$/); # untaint
+    die "format '$format' includes whitespace\n" if !defined($format);
     if (defined($parent)) {
-	($parent) = ($parent =~ /^(\S+)$/) or die "parent '$parent' includes whitespace\n"; # untaint
+	($parent) = ($parent =~ /^(\S+)$/); # untaint
     }
     return wantarray ? ($size, $format, $used, $parent, $st->ctime) : $size;
 }
@@ -1568,13 +1595,14 @@ sub read_common_header($) {
 # Export a volume into a file handle as a stream of desired format.
 sub volume_export {
     my ($class, $scfg, $storeid, $fh, $volname, $format, $snapshot, $base_snapshot, $with_snapshots) = @_;
+
+    my $err_msg = "volume export format $format not available for $class\n";
     if ($scfg->{path} && !defined($snapshot) && !defined($base_snapshot)) {
-	my $file = $class->path($scfg, $volname, $storeid)
-	    or goto unsupported;
+	my $file = $class->path($scfg, $volname, $storeid) or die $err_msg;
 	my ($size, $file_format) = file_size_info($file);
 
 	if ($format eq 'raw+size') {
-	    goto unsupported if $with_snapshots || $file_format eq 'subvol';
+	    die $err_msg if $with_snapshots || $file_format eq 'subvol';
 	    write_common_header($fh, $size);
 	    if ($file_format eq 'raw') {
 		run_command(['dd', "if=$file", "bs=4k", "status=progress"], output => '>&'.fileno($fh));
@@ -1585,20 +1613,19 @@ sub volume_export {
 	    return;
 	} elsif ($format =~ /^(qcow2|vmdk)\+size$/) {
 	    my $data_format = $1;
-	    goto unsupported if !$with_snapshots || $file_format ne $data_format;
+	    die $err_msg if !$with_snapshots || $file_format ne $data_format;
 	    write_common_header($fh, $size);
 	    run_command(['dd', "if=$file", "bs=4k", "status=progress"], output => '>&'.fileno($fh));
 	    return;
 	} elsif ($format eq 'tar+size') {
-	    goto unsupported if $file_format ne 'subvol';
+	    die $err_msg if $file_format ne 'subvol';
 	    write_common_header($fh, $size);
 	    run_command(['tar', @COMMON_TAR_FLAGS, '-cf', '-', '-C', $file, '.'],
 	                output => '>&'.fileno($fh));
 	    return;
 	}
     }
- unsupported:
-    die "volume export format $format not available for $class";
+    die $err_msg;
 }
 
 sub volume_export_formats {

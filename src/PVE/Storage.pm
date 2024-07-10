@@ -39,6 +39,7 @@ use PVE::Storage::ZFSPoolPlugin;
 use PVE::Storage::ZFSPlugin;
 use PVE::Storage::PBSPlugin;
 use PVE::Storage::BTRFSPlugin;
+use PVE::Storage::ESXiPlugin;
 
 # Storage API version. Increment it on changes in storage API interface.
 use constant APIVER => 10;
@@ -64,6 +65,7 @@ PVE::Storage::ZFSPoolPlugin->register();
 PVE::Storage::ZFSPlugin->register();
 PVE::Storage::PBSPlugin->register();
 PVE::Storage::BTRFSPlugin->register();
+PVE::Storage::ESXiPlugin->register();
 
 # load third-party plugins
 if ( -d '/usr/share/perl5/PVE/Storage/Custom' ) {
@@ -112,7 +114,7 @@ our $VZTMPL_EXT_RE_1 = qr/\.tar\.(gz|xz|zst)/i;
 
 our $BACKUP_EXT_RE_2 = qr/\.(tgz|(?:tar|vma)(?:\.(${\PVE::Storage::Plugin::COMPRESSOR_RE}))?)/;
 
-# FIXME remove with PVE 8.0, add versioned breaks for pve-manager
+# FIXME remove with PVE 9.0, add versioned breaks for pve-manager
 our $vztmpl_extension_re = $VZTMPL_EXT_RE_1;
 
 #  PVE::Storage utility functions
@@ -707,7 +709,7 @@ sub storage_migrate_snapshot {
 }
 
 my $volume_import_prepare = sub {
-    my ($volid, $format, $path, $apiver, $opts) = @_;
+    my ($volid, $format, $path, $opts) = @_;
 
     my $base_snapshot = $opts->{base_snapshot};
     my $snapshot = $opts->{snapshot};
@@ -722,11 +724,11 @@ my $volume_import_prepare = sub {
     if ($migration_snapshot) {
 	push @$recv, '-delete-snapshot', $snapshot;
     }
-    push @$recv, '-allow-rename', $allow_rename if $apiver >= 5;
+    push @$recv, '-allow-rename', $allow_rename;
 
     if (defined($base_snapshot)) {
 	# Check if the snapshot exists on the remote side:
-	push @$recv, '-base', $base_snapshot if $apiver >= 9;
+	push @$recv, '-base', $base_snapshot;
     }
 
     return $recv;
@@ -812,12 +814,7 @@ sub storage_migrate {
 	$import_fn = "tcp://$net";
     }
 
-    my $target_apiver = 1; # if there is no apiinfo call, assume 1
-    my $get_api_version = [@$ssh, 'pvesm', 'apiinfo'];
-    my $match_api_version = sub { $target_apiver = $1 if $_[0] =~ m!^APIVER (\d+)$!; };
-    eval { run_command($get_api_version, logfunc => $match_api_version); };
-
-    my $recv = [ @$ssh, '--', $volume_import_prepare->($target_volid, $format, $import_fn, $target_apiver, $opts)->@* ];
+    my $recv = [ @$ssh, '--', $volume_import_prepare->($target_volid, $format, $import_fn, $opts)->@* ];
 
     my $new_volid;
     my $pattern = volume_imported_message(undef, 1);
@@ -849,43 +846,59 @@ sub storage_migrate {
 
     eval {
 	if ($insecure) {
-	    my $input = IO::File->new();
-	    my $info = IO::File->new();
-	    open3($input, $info, $info, @$recv)
-		or die "receive command failed: $!\n";
-	    close($input);
+	    my ($ip, $port, $socket);
+	    my $send_error;
 
-	    my $try_ip = <$info> // '';
-	    my ($ip) = $try_ip =~ /^($PVE::Tools::IPRE)$/ # untaint
-		or die "no tunnel IP received, got '$try_ip'\n";
+	    my $handle_insecure_migration = sub {
+		my $line = shift;
 
-	    my $try_port = <$info> // '';
-	    my ($port) = $try_port =~ /^(\d+)$/ # untaint
-		or die "no tunnel port received, got '$try_port'\n";
+		if (!$ip) {
+		    ($ip) = $line =~ /^($PVE::Tools::IPRE)$/ # untaint
+			or die "no tunnel IP received, got '$line'\n";
+		} elsif (!$port) {
+		    ($port) = $line =~ /^(\d+)$/ # untaint
+			or die "no tunnel port received, got '$line'\n";
 
-	    my $socket = IO::Socket::IP->new(PeerHost => $ip, PeerPort => $port, Type => SOCK_STREAM)
-		or die "failed to connect to tunnel at $ip:$port\n";
-	    # we won't be reading from the socket
-	    shutdown($socket, 0);
+		    # create socket, run command
+		    $socket = IO::Socket::IP->new(
+			PeerHost => $ip,
+			PeerPort => $port,
+			Type => SOCK_STREAM,
+		    );
+		    die "failed to connect to tunnel at $ip:$port\n" if !$socket;
+		    # we won't be reading from the socket
+		    shutdown($socket, 0);
 
-	    eval { run_command($cmds, output => '>&'.fileno($socket), errfunc => $match_volid_and_log); };
-	    my $send_error = $@;
+		    eval {
+			run_command(
+			    $cmds,
+			    output => '>&'.fileno($socket),
+			    errfunc => $match_volid_and_log,
+			);
+		    };
+		    $send_error = $@;
 
-	    # don't close the connection entirely otherwise the receiving end
-	    # might not get all buffered data (and fails with 'connection reset by peer')
-	    shutdown($socket, 1);
+		    # don't close the connection entirely otherwise the receiving end
+		    # might not get all buffered data (and fails with 'connection reset by peer')
+		    shutdown($socket, 1);
+		} else {
+		    $match_volid_and_log->("[$target_sshinfo->{name}] $line");
+		}
+	    };
 
-	    # wait for the remote process to finish
-	    while (my $line = <$info>) {
-		$match_volid_and_log->("[$target_sshinfo->{name}] $line");
-	    }
-
-	    # now close the socket
-	    close($socket);
-	    if (!close($info)) { # does waitpid()
-		die "import failed: $!\n" if $!;
-		die "import failed: exit code ".($?>>8)."\n";
-	    }
+	    eval {
+		run_command(
+		    $recv,
+		    outfunc => $handle_insecure_migration,
+		    errfunc => sub {
+			my $line = shift;
+			$match_volid_and_log->("[$target_sshinfo->{name}] $line");
+		    },
+		);
+	    };
+	    my $recv_err = $@;
+	    close($socket) if $socket;
+	    die "failed to run insecure migration: $recv_err\n" if $recv_err;
 
 	    die $send_error if $send_error;
 	} else {
@@ -893,12 +906,11 @@ sub storage_migrate {
 	    run_command($cmds, logfunc => $match_volid_and_log);
 	}
 
-	die "unable to get ID of the migrated volume\n"
-	    if !defined($new_volid) && $target_apiver >= 5;
+	die "unable to get ID of the migrated volume\n" if !defined($new_volid);
     };
     my $err = $@;
-    warn "send/receive failed, cleaning up snapshot(s)..\n" if $err;
     if ($opts->{migration_snapshot}) {
+	warn "send/receive failed, cleaning up snapshot(s)..\n" if $err;
 	eval { volume_snapshot_delete($cfg, $volid, $opts->{snapshot}, 0) };
 	warn "could not remove source snapshot: $@\n" if $@;
     }
@@ -1107,7 +1119,7 @@ sub template_list {
 sub volume_list {
     my ($cfg, $storeid, $vmid, $content) = @_;
 
-    my @ctypes = qw(rootdir images vztmpl iso backup snippets);
+    my @ctypes = qw(rootdir images vztmpl iso backup snippets import);
 
     my $cts = $content ? [ $content ] : [ @ctypes ];
 
@@ -1943,7 +1955,7 @@ sub volume_import_start {
     my $info = IO::File->new();
 
     my $unix = $opts->{unix} // "/run/pve/storage-migrate-$vmid.$$.unix";
-    my $import = $volume_import_prepare->($volid, $format, "unix://$unix", APIVER, $opts);
+    my $import = $volume_import_prepare->($volid, $format, "unix://$unix", $opts);
 
     unlink $unix;
     my $cpid = open3($input, $info, $info, @$import)
@@ -2163,6 +2175,22 @@ sub normalize_content_filename {
     $filename =~ s/[^a-zA-Z0-9_.-]/_/g;
 
     return $filename;
+}
+
+# If a storage provides an 'import' content type, it should be able to provide
+# an object implementing the import information interface.
+sub get_import_metadata {
+    my ($cfg, $volid) = @_;
+
+    my ($storeid, $volname) = parse_volume_id($volid);
+
+    my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+    if (!$plugin->can('get_import_metadata')) {
+	die "storage does not support the importer API\n";
+    }
+
+    return $plugin->get_import_metadata($scfg, $volname, $storeid);
 }
 
 1;
