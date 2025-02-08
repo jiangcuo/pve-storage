@@ -40,6 +40,7 @@ sub plugindata {
 		backup => 1,
 		snippets => 1,
 		none => 1,
+		import => 1,
 	    },
 	    { images => 1, rootdir => 1 },
 	],
@@ -195,13 +196,13 @@ sub filesystem_path {
 
     $path .= "/$vmid" if $vtype eq 'images';
 
-    if (defined($format) && $format eq 'raw') {
+    if ($vtype eq 'images' && defined($format) && $format eq 'raw') {
 	my $dir = raw_name_to_dir($name);
 	if ($snapname) {
 	    $dir .= "\@$snapname";
 	}
 	$path .= "/$dir/disk.raw";
-    } elsif (defined($format) && $format eq 'subvol') {
+    } elsif ($vtype eq 'images' && defined($format) && $format eq 'subvol') {
 	$path .= "/$name";
 	if ($snapname) {
 	    $path .= "\@$snapname";
@@ -226,7 +227,7 @@ sub btrfs_cmd {
     } else {
 	$func = sub { $msg .= "$_[0]\n" };
     }
-    run_command(['btrfs', '-q', @$cmd], errmsg => 'btrfs error', outfunc => $func);
+    run_command(['btrfs', '-q', @$cmd], errmsg => "command 'btrfs @$cmd' failed", outfunc => $func);
 
     return $msg;
 }
@@ -421,10 +422,10 @@ my sub foreach_subvol : prototype($$) {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase, $_format) = @_;
 
-    my (undef, undef, $vmid, undef, undef, undef, $format) =
+    my ($vtype, undef, $vmid, undef, undef, undef, $format) =
 	$class->parse_volname($volname);
 
-    if (!defined($format) || ($format ne 'subvol' && $format ne 'raw')) {
+    if (!defined($format) || $vtype ne 'images' || ($format ne 'subvol' && $format ne 'raw')) {
 	return $class->SUPER::free_image($storeid, $scfg, $volname, $isBase, $_format);
     }
 
@@ -489,7 +490,7 @@ sub volume_size_info {
 	return wantarray ? ($size, 'subvol', $used, undef, $ctime) : 1;
     }
 
-    return PVE::Storage::Plugin::file_size_info($path, $timeout);
+    return PVE::Storage::Plugin::file_size_info($path, $timeout, $format);
 }
 
 sub volume_resize {
@@ -618,6 +619,9 @@ sub volume_has_feature {
 	    base => { qcow2 => 1, raw => 1, vmdk => 1 },
 	    current => { qcow2 => 1, raw => 1, vmdk => 1 },
 	},
+	rename => {
+	    current => { qcow2 => 1, raw => 1, vmdk => 1 },
+	},
     };
 
     my ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format) = $class->parse_volname($volname);
@@ -657,15 +661,27 @@ sub list_images {
 
 	if (!$ext) { # raw
 	    $volid .= '.raw';
-	    ($size, $format, $used, $parent, $ctime) = PVE::Storage::Plugin::file_size_info("$fn/disk.raw");
+	    $format = 'raw';
+	    ($size, undef, $used, $parent, $ctime) =
+		PVE::Storage::Plugin::file_size_info("$fn/disk.raw", undef, $format);
 	} elsif ($ext eq 'subvol') {
 	    ($used, $size) = (0, 0);
 	    #($used, $size) = btrfs_subvol_quota($class, $fn);
 	    $format = 'subvol';
 	} else {
-	    ($size, $format, $used, $parent, $ctime) = PVE::Storage::Plugin::file_size_info($fn);
+	    $format = $ext;
+	    ($size, undef, $used, $parent, $ctime) = eval {
+		PVE::Storage::Plugin::file_size_info($fn, undef, $format);
+	    };
+	    if (my $err = $@) {
+		die $err if $err !~ m/Image is not in \S+ format$/;
+		warn "image '$fn' is not in expected format '$format', querying as raw\n";
+		($size, undef, $used, $parent, $ctime) =
+		    PVE::Storage::Plugin::file_size_info($fn, undef, 'raw');
+		$format = 'invalid';
+	    }
 	}
-	next if !($format && defined($size));
+	next if !defined($size);
 
 	if ($vollist) {
 	    next if ! grep { $_ eq $volid } @$vollist;
@@ -928,6 +944,40 @@ sub volume_import {
     }
 
     return "$storeid:$volname";
+}
+
+sub rename_volume {
+    my ($class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname) = @_;
+    die "no path found\n" if !$scfg->{path};
+
+    my $format = ($class->parse_volname($source_volname))[6];
+
+    if ($format ne 'raw' && $format ne 'subvol') {
+       return $class->SUPER::rename_volume($scfg, $storeid, $source_volname, $target_vmid, $target_volname);
+    }
+
+    $target_volname = $class->find_free_diskname($storeid, $scfg, $target_vmid, $format, 1)
+	if !$target_volname;
+    $target_volname = "$target_vmid/$target_volname";
+
+    my $basedir = $class->get_subdir($scfg, 'images');
+
+    mkpath "${basedir}/${target_vmid}";
+    my $source_dir = raw_name_to_dir($source_volname);
+    my $target_dir = raw_name_to_dir($target_volname);
+
+    my $old_path = "${basedir}/${source_dir}";
+    my $new_path = "${basedir}/${target_dir}";
+
+    die "target volume '${target_volname}' already exists\n" if -e $new_path;
+    rename $old_path, $new_path ||
+	die "rename '$old_path' to '$new_path' failed - $!\n";
+
+    return "${storeid}:$target_volname";
+}
+
+sub get_import_metadata {
+    return PVE::Storage::DirPlugin::get_import_metadata(@_);
 }
 
 1

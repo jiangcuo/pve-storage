@@ -29,12 +29,12 @@ my $tests = [
     {
 	description => 'ISO image, iso',
 	volname     => 'iso/some-installation-disk.iso',
-	expected    => ['iso', 'some-installation-disk.iso'],
+	expected    => ['iso', 'some-installation-disk.iso', undef, undef, undef, undef, 'raw'],
     },
     {
 	description => 'ISO image, img',
 	volname     => 'iso/some-other-installation-disk.img',
-	expected    => ['iso', 'some-other-installation-disk.img'],
+	expected    => ['iso', 'some-other-installation-disk.img', undef, undef, undef, undef, 'raw'],
     },
     #
     # container templates
@@ -42,12 +42,17 @@ my $tests = [
     {
 	description => 'Container template tar.gz',
 	volname     => 'vztmpl/debian-10.0-standard_10.0-1_amd64.tar.gz',
-	expected    => ['vztmpl', 'debian-10.0-standard_10.0-1_amd64.tar.gz'],
+	expected    => ['vztmpl', 'debian-10.0-standard_10.0-1_amd64.tar.gz', undef, undef, undef, undef, 'raw'],
     },
     {
 	description => 'Container template tar.xz',
 	volname     => 'vztmpl/debian-10.0-standard_10.0-1_amd64.tar.xz',
-	expected    => ['vztmpl', 'debian-10.0-standard_10.0-1_amd64.tar.xz'],
+	expected    => ['vztmpl', 'debian-10.0-standard_10.0-1_amd64.tar.xz', undef, undef, undef, undef, 'raw'],
+    },
+    {
+	description => 'Container template tar.bz2',
+	volname     => 'vztmpl/debian-10.0-standard_10.0-1_amd64.tar.bz2',
+	expected    => ['vztmpl', 'debian-10.0-standard_10.0-1_amd64.tar.bz2', undef, undef, undef, undef, 'raw'],
     },
     #
     # container rootdir
@@ -65,7 +70,7 @@ my $tests = [
     {
 	description => 'Backup archive, no virtualization type',
 	volname     => "backup/vzdump-none-$vmid-2020_03_30-21_39_30.tar",
-	expected    => ['backup', "vzdump-none-$vmid-2020_03_30-21_39_30.tar"],
+	expected    => ['backup', "vzdump-none-$vmid-2020_03_30-21_39_30.tar", undef, undef, undef, undef, 'raw'],
     },
     #
     # Snippets
@@ -73,12 +78,45 @@ my $tests = [
     {
 	description => 'Snippets, yaml',
 	volname     => 'snippets/userconfig.yaml',
-	expected    => ['snippets', 'userconfig.yaml'],
+	expected    => ['snippets', 'userconfig.yaml', undef, undef, undef, undef, 'raw'],
     },
     {
 	description => 'Snippets, perl',
 	volname     => 'snippets/hookscript.pl',
-	expected    => ['snippets', 'hookscript.pl'],
+	expected    => ['snippets', 'hookscript.pl', undef, undef, undef, undef, 'raw'],
+    },
+    #
+    # Import
+    #
+    {
+	description => "Import, ova",
+	volname     => 'import/import.ova',
+	expected    => ['import', 'import.ova', undef, undef, undef ,undef, 'ova'],
+    },
+    {
+	description => "Import, ovf",
+	volname     => 'import/import.ovf',
+	expected    => ['import', 'import.ovf', undef, undef, undef ,undef, 'ovf'],
+    },
+    {
+	description => "Import, innner file of ova",
+	volname     => 'import/import.ova/disk.qcow2',
+	expected    => ['import', 'import.ova/disk.qcow2', undef, undef, undef, undef, 'ova+qcow2'],
+    },
+    {
+	description => "Import, innner file of ova",
+	volname     => 'import/import.ova/disk.vmdk',
+	expected    => ['import', 'import.ova/disk.vmdk', undef, undef, undef, undef, 'ova+vmdk'],
+    },
+    {
+	description => "Import, innner file of ova with whitespace in name",
+	volname     => 'import/import.ova/OS disk.vmdk',
+	expected    => ['import', 'import.ova/OS disk.vmdk', undef, undef, undef, undef, 'ova+vmdk'],
+    },
+    {
+	description => "Import, innner file of ova",
+	volname     => 'import/import.ova/disk.raw',
+	expected    => ['import', 'import.ova/disk.raw', undef, undef, undef, undef, 'ova+raw'],
     },
     #
     # failed matches
@@ -99,11 +137,6 @@ my $tests = [
 	expected    => "unable to parse directory volume name 'vztmpl/debian-10.0-standard_10.0-1_amd64.zip.gz'\n",
     },
     {
-	description => 'Failed match: Container template, tar.bz2',
-	volname     => 'vztmpl/debian-10.0-standard_10.0-1_amd64.tar.bz2',
-	expected    => "unable to parse directory volume name 'vztmpl/debian-10.0-standard_10.0-1_amd64.tar.bz2'\n",
-    },
-    {
 	description => 'Failed match: Container rootdir, subvol',
 	volname     => "rootdir/subvol-$vmid-disk-0",
 	expected    => "unable to parse directory volume name 'rootdir/subvol-$vmid-disk-0'\n",
@@ -122,6 +155,11 @@ my $tests = [
 	description => 'Failed match: VM disk image, linked, qcow2, second vmid',
 	volname     => "$vmid/base-$vmid-disk-0.qcow2/ssss/vm-$vmid-disk-0.qcow2",
 	expected    => "unable to parse volume filename 'base-$vmid-disk-0.qcow2/ssss/vm-$vmid-disk-0.qcow2'\n",
+    },
+    {
+	description => "Failed match: import dir but no ova/ovf/disk image",
+	volname	    => "import/test.foo",
+	expected    => "unable to parse directory volume name 'import/test.foo'\n",
     },
 ];
 
@@ -177,7 +215,7 @@ foreach my $s (@$disk_suffix) {
 # create more test cases for backup files matches
 my $bkp_suffix = {
     qemu   => [ 'vma', 'vma.gz', 'vma.lzo', 'vma.zst' ],
-    lxc    => [ 'tar', 'tgz', 'tar.gz', 'tar.lzo', 'tar.zst' ],
+    lxc    => [ 'tar', 'tgz', 'tar.gz', 'tar.lzo', 'tar.zst', 'tar.bz2' ],
     openvz => [ 'tar', 'tgz', 'tar.gz', 'tar.lzo', 'tar.zst' ],
 };
 
@@ -191,7 +229,11 @@ foreach my $virt (keys %$bkp_suffix) {
 		expected    => [
 		    'backup',
 		    "vzdump-$virt-$vmid-2020_03_30-21_12_40.$s",
-		    "$vmid"
+		    "$vmid",
+		    undef,
+		    undef,
+		    undef,
+		    'raw'
 		],
 	    },
 	);
@@ -204,7 +246,7 @@ foreach my $virt (keys %$bkp_suffix) {
 # create more test cases for failed backup files matches
 my $non_bkp_suffix = {
     qemu   => [ 'vms.gz', 'vma.xz' ],
-    lxc    => [ 'tar.bz2', 'zip.gz', 'tgz.lzo' ],
+    lxc    => [ 'zip.gz', 'tgz.lzo' ],
 };
 foreach my $virt (keys %$non_bkp_suffix) {
     my $suffix = $non_bkp_suffix->{$virt};

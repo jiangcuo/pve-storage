@@ -9,6 +9,8 @@ use PVE::Tools qw(run_command trim);
 use PVE::Storage::Plugin;
 use PVE::JSONSchema qw(get_standard_option);
 
+use PVE::Storage::Common;
+
 use base qw(PVE::Storage::Plugin);
 
 # lvm helper functions
@@ -532,7 +534,7 @@ sub deactivate_storage {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
     #fix me lvmchange is not provided on
-    my $path = $class->path($scfg, $volname, $snapname);
+    my $path = $class->path($scfg, $volname, $storeid, $snapname);
 
     my $lvm_activate_mode = 'ey';
 
@@ -545,7 +547,7 @@ sub activate_volume {
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
-    my $path = $class->path($scfg, $volname, $snapname);
+    my $path = $class->path($scfg, $volname, $storeid, $snapname);
     return if ! -b $path;
 
     my $cmd = ['/sbin/lvchange', '-aln', $path];
@@ -677,7 +679,7 @@ sub volume_import {
     }
 
     my ($size) = PVE::Storage::Plugin::read_common_header($fh);
-    $size = int($size/1024);
+    $size = PVE::Storage::Common::align_size_up($size, 1024) / 1024;
 
     eval {
 	my $allocname = $class->alloc_image($storeid, $scfg, $vmid, 'raw', $name, $size);

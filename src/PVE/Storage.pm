@@ -110,9 +110,18 @@ PVE::Storage::Plugin->init();
 
 our $ISO_EXT_RE_0 = qr/\.(?:iso|img)/i;
 
-our $VZTMPL_EXT_RE_1 = qr/\.tar\.(gz|xz|zst)/i;
+our $VZTMPL_EXT_RE_1 = qr/\.tar\.(gz|xz|zst|bz2)/i;
 
 our $BACKUP_EXT_RE_2 = qr/\.(tgz|(?:tar|vma)(?:\.(${\PVE::Storage::Plugin::COMPRESSOR_RE}))?)/;
+
+our $IMPORT_EXT_RE_1 = qr/\.(ova|ovf|qcow2|raw|vmdk)/;
+
+our $UPLOAD_IMPORT_EXT_RE_1 = qr/\.(ova)/;
+
+our $SAFE_CHAR_CLASS_RE = qr/[a-zA-Z0-9\-\.\+\=\_]/;
+our $SAFE_CHAR_WITH_WHITESPACE_CLASS_RE = qr/[ a-zA-Z0-9\-\.\+\=\_]/;
+
+our $OVA_CONTENT_RE_1 = qr/${SAFE_CHAR_WITH_WHITESPACE_CLASS_RE}+\.(qcow2|raw|vmdk)/;
 
 # FIXME remove with PVE 9.0, add versioned breaks for pve-manager
 our $vztmpl_extension_re = $VZTMPL_EXT_RE_1;
@@ -233,9 +242,9 @@ sub storage_ids {
 }
 
 sub file_size_info {
-    my ($filename, $timeout) = @_;
+    my ($filename, $timeout, $file_format, $untrusted) = @_;
 
-    return PVE::Storage::Plugin::file_size_info($filename, $timeout);
+    return PVE::Storage::Plugin::file_size_info($filename, $timeout, $file_format, $untrusted);
 }
 
 sub get_volume_attribute {
@@ -291,7 +300,7 @@ sub volume_size_info {
 	my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
 	return $plugin->volume_size_info($scfg, $storeid, $volname, $timeout);
     } elsif ($volid =~ m|^(/.+)$| && -e $volid) {
-	return file_size_info($volid, $timeout);
+	return file_size_info($volid, $timeout, 'auto-detect');
     } else {
 	return 0;
     }
@@ -460,6 +469,15 @@ sub get_iso_dir {
     return $plugin->get_subdir($scfg, 'iso');
 }
 
+sub get_import_dir {
+    my ($cfg, $storeid) = @_;
+
+    my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    return $plugin->get_subdir($scfg, 'import');
+}
+
 sub get_vztmpl_dir {
     my ($cfg, $storeid) = @_;
 
@@ -525,7 +543,7 @@ sub check_volume_access {
 
 	return if $rpcenv->check($user, "/storage/$sid", ['Datastore.Allocate'], 1);
 
-	if ($vtype eq 'iso' || $vtype eq 'vztmpl') {
+	if ($vtype eq 'iso' || $vtype eq 'vztmpl' || $vtype eq 'import') {
 	    # require at least read access to storage, (custom) templates/ISOs could be sensitive
 	    $rpcenv->check_any($user, "/storage/$sid", ['Datastore.AllocateSpace', 'Datastore.Audit']);
 	} elsif (defined($ownervm) && defined($vmid) && ($ownervm == $vmid)) {
@@ -612,6 +630,7 @@ sub path_to_volume_id {
 	my $backupdir = $plugin->get_subdir($scfg, 'backup');
 	my $privatedir = $plugin->get_subdir($scfg, 'rootdir');
 	my $snippetsdir = $plugin->get_subdir($scfg, 'snippets');
+	my $importdir = $plugin->get_subdir($scfg, 'import');
 
 	if ($path =~ m!^$imagedir/(\d+)/([^/\s]+)$!) {
 	    my $vmid = $1;
@@ -640,6 +659,9 @@ sub path_to_volume_id {
 	} elsif ($path =~ m!^$snippetsdir/([^/]+)$!) {
 	    my $name = $1;
 	    return ('snippets', "$sid:snippets/$name");
+	} elsif ($path =~ m!^$importdir/(${SAFE_CHAR_CLASS_RE}+${IMPORT_EXT_RE_1})$!) {
+	    my $name = $1;
+	    return ('import', "$sid:import/$name");
 	}
     }
 
@@ -1550,16 +1572,19 @@ sub decompressor_info {
 	    gz => ['tar', '-z'],
 	    lzo => ['tar', '--lzop'],
 	    zst => ['tar', '--zstd'],
+	    bz2 => ['tar', '--bzip2'],
 	},
 	vma => {
 	    gz => ['zcat'],
 	    lzo => ['lzop', '-d', '-c'],
 	    zst => ['zstd', '-q', '-d', '-c'],
+	    bz2 => ['bzcat', '-q'],
 	},
 	iso => {
 	    gz => ['zcat'],
 	    lzo => ['lzop', '-d', '-c'],
 	    zst => ['zstd', '-q', '-d', '-c'],
+	    bz2 => ['bzcat', '-q'],
 	},
     };
 
@@ -2191,6 +2216,16 @@ sub get_import_metadata {
     }
 
     return $plugin->get_import_metadata($scfg, $volname, $storeid);
+}
+
+# dies if the content of the given path is unexpected for an ISO
+sub assert_iso_content {
+    my ($path) = @_;
+
+    # check for things like backing image
+    file_size_info($path, undef, 'auto-detect', 1);
+
+    return 1;
 }
 
 1;

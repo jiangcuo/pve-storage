@@ -15,11 +15,13 @@ use PVE::Tools qw(run_command);
 use PVE::JSONSchema qw(get_standard_option register_standard_option);
 use PVE::Cluster qw(cfs_register_file);
 
+use PVE::Storage::Common;
+
 use JSON;
 
 use base qw(PVE::SectionConfig);
 
-use constant KNOWN_COMPRESSION_FORMATS =>  ('gz', 'lzo', 'zst');
+use constant KNOWN_COMPRESSION_FORMATS =>  ('gz', 'lzo', 'zst', 'bz2');
 use constant COMPRESSOR_RE => join('|', KNOWN_COMPRESSION_FORMATS);
 
 use constant LOG_EXT => ".log";
@@ -650,19 +652,25 @@ sub parse_volname {
 	my (undef, $format, $isBase) = parse_name_dir($name);
 	return ('images', $name, $vmid, undef, undef, $isBase, $format);
     } elsif ($volname =~ m!^iso/([^/]+$PVE::Storage::ISO_EXT_RE_0)$!) {
-	return ('iso', $1);
+	return ('iso', $1, undef, undef, undef, undef, 'raw');
     } elsif ($volname =~ m!^vztmpl/([^/]+$PVE::Storage::VZTMPL_EXT_RE_1)$!) {
-	return ('vztmpl', $1);
+	return ('vztmpl', $1, undef, undef, undef, undef, 'raw');
     } elsif ($volname =~ m!^rootdir/(\d+)$!) {
 	return ('rootdir', $1, $1);
     } elsif ($volname =~ m!^backup/([^/]+$PVE::Storage::BACKUP_EXT_RE_2)$!) {
 	my $fn = $1;
 	if ($fn =~ m/^vzdump-(openvz|lxc|qemu)-(\d+)-.+/) {
-	    return ('backup', $fn, $2);
+	    return ('backup', $fn, $2, undef, undef, undef, 'raw');
 	}
-	return ('backup', $fn);
+	return ('backup', $fn, undef, undef, undef, undef, 'raw');
     } elsif ($volname =~ m!^snippets/([^/]+)$!) {
-	return ('snippets', $1);
+	return ('snippets', $1, undef, undef, undef, undef, 'raw');
+    } elsif ($volname =~ m!^import/(${PVE::Storage::SAFE_CHAR_WITH_WHITESPACE_CLASS_RE}+\.ova\/${PVE::Storage::OVA_CONTENT_RE_1})$!) {
+	my $packed_image = $1;
+	my $format = $2;
+	return ('import', $packed_image, undef, undef, undef, undef, "ova+$format");
+    } elsif ($volname =~ m!^import/(${PVE::Storage::SAFE_CHAR_WITH_WHITESPACE_CLASS_RE}+$PVE::Storage::IMPORT_EXT_RE_1)$!) {
+	return ('import', $1, undef, undef, undef, undef, $2);
     }
 
     die "unable to parse directory volume name '$volname'\n";
@@ -675,6 +683,7 @@ my $vtype_subdirs = {
     vztmpl => 'template/cache',
     backup => 'dump',
     snippets => 'snippets',
+    import => 'import',
 };
 
 sub get_vtype_subdirs {
@@ -735,8 +744,8 @@ sub create_base {
 
     my $path = $class->filesystem_path($scfg, $volname);
 
-    my ($size, undef, $used, $parent) = file_size_info($path);
-    die "file_size_info on '$volname' failed\n" if !($format && defined($size));
+    my ($size, undef, undef, $parent) = file_size_info($path, undef, $format);
+    die "file_size_info on '$volname' failed\n" if !defined($size);
 
     die "volname '$volname' contains wrong information about parent\n"
 	if $basename && (!$parent || $parent ne "../$basevmid/$basename");
@@ -943,25 +952,79 @@ sub free_image {
     return undef;
 }
 
+# TODO taken from PVE/QemuServer/Drive.pm, avoiding duplication would be nice
+my @checked_qemu_img_formats = qw(raw cow qcow qcow2 qed vmdk cloop);
+
+# set $untrusted if the file in question might be malicious since it isn't
+# created by our stack
+# this makes certain checks fatal, and adds extra checks for known problems like
+# - backing files (qcow2/vmdk)
+# - external data files (qcow2)
+#
+# Set $file_format to force qemu-img to treat the image as being a specific format. Use the value
+# 'auto-detect' for auto-detection. The parameter is planned to become mandatory with Proxmox VE 9.
 sub file_size_info {
-    my ($filename, $timeout) = @_;
+    my ($filename, $timeout, $file_format, $untrusted) = @_;
+
+    # TODO PVE 9 make $file_format mandatory
+    warn "file_size_info: detected call without \$file_format parameter\n"
+	if !defined($file_format);
+
+    # compat for old parameter order
+    # TODO PVE 9 remove
+    if (defined($file_format) && ($file_format eq '1' || $file_format eq '0')) {
+	warn "file_size_info: detected call with legacy parameter order: \$untrusted before"
+	    ." \$file_format\n";
+	$untrusted = $file_format;
+	$file_format = undef;
+    }
+
+    $file_format = undef if $file_format && $file_format eq 'auto-detect';
 
     my $st = File::stat::stat($filename);
 
     if (!defined($st)) {
 	my $extramsg = -l $filename ? ' - dangling symlink?' : '';
-	warn "failed to stat '$filename'$extramsg\n";
-	return undef;
+	my $msg = "failed to stat '$filename'$extramsg\n";
+	if ($untrusted) {
+	    die $msg;
+	} else {
+	    warn $msg;
+	    return undef;
+	}
     }
 
+    my $handle_error = sub {
+	my ($msg) = @_;
+	if ($untrusted) {
+	    die $msg;
+	} else {
+	    warn $msg;
+	    return wantarray ? (undef, undef, undef, undef, $st->ctime) : undef;
+	}
+    };
+
     if (S_ISDIR($st->mode)) {
+	$handle_error->("expected format '$file_format', but '$filename' is a directory\n")
+	    if $file_format && $file_format ne 'subvol';
 	return wantarray ? (0, 'subvol', 0, undef, $st->ctime) : 1;
+    } elsif ($file_format && $file_format eq 'subvol') {
+	$handle_error->("expected format '$file_format', but '$filename' is not a directory\n");
     }
+
+    # TODO PVE 9 - consider upgrading to "die" if an unsupported format is passed in after
+    # evaluating breakage potential.
+    if ($file_format && !grep { $_ eq $file_format } @checked_qemu_img_formats) {
+	warn "file_size_info: '$filename': falling back to 'raw' from unknown format '$file_format'\n";
+	$file_format = 'raw';
+    }
+    my $cmd = ['/usr/bin/qemu-img', 'info', '--output=json', $filename];
+    push $cmd->@*, '-f', $file_format if $file_format;
 
     my $json = '';
     my $err_output = '';
     eval {
-	run_command(['/usr/bin/qemu-img', 'info', '--output=json', $filename],
+	run_command($cmd,
 	    timeout => $timeout,
 	    outfunc => sub { $json .= shift },
 	    errfunc => sub { $err_output .= shift . "\n"},
@@ -974,14 +1037,31 @@ sub file_size_info {
 	# otherwise we warn about it and try to parse the json
 	warn $err_output;
     }
-
-    my $info = eval { decode_json($json) };
-    if (my $err = $@) {
-	warn "could not parse qemu-img info command output for '$filename' - $err\n";
+    if (!$json) {
+	die "failed to query file information with qemu-img\n" if $untrusted;
+	# skip decoding if there was no output, e.g. if there was a timeout.
 	return wantarray ? (undef, undef, undef, undef, $st->ctime) : undef;
     }
 
+    my $info = eval { decode_json($json) };
+    $handle_error->("could not parse qemu-img info command output for '$filename' - $@\n") if $@;
+
+    if ($untrusted) {
+	if (my $format_specific = $info->{'format-specific'}) {
+	    if ($format_specific->{type} eq 'qcow2' && $format_specific->{data}->{"data-file"}) {
+		die "$filename: 'data-file' references are not allowed!\n";
+	    } elsif ($format_specific->{type} eq 'vmdk') {
+		my $extents = $format_specific->{data}->{extents};
+		my $children = $info->{children};
+		die "$filename: multiple children or extents are not allowed!\n"
+		    if scalar($children->@*) > 1 || scalar($extents->@*) > 1;
+	    }
+	}
+    }
+
     my ($size, $format, $used, $parent) = $info->@{qw(virtual-size format actual-size backing-filename)};
+
+    die "backing file not allowed for untrusted image '$filename'!\n" if $untrusted && $parent;
 
     ($size) = ($size =~ /^(\d+)$/); # untaint
     die "size '$size' not an integer\n" if !defined($size);
@@ -994,8 +1074,13 @@ sub file_size_info {
     ($format) = ($format =~ /^(\S+)$/); # untaint
     die "format '$format' includes whitespace\n" if !defined($format);
     if (defined($parent)) {
+	warn "strange parent name path '$parent' found\n" if $parent =~ m/[^\S]/;
 	($parent) = ($parent =~ /^(\S+)$/); # untaint
     }
+
+    die "qemu-img bug: queried format does not match format in result '$file_format ne $format'"
+	if $file_format && $file_format ne $format;
+
     return wantarray ? ($size, $format, $used, $parent, $st->ctime) : $size;
 }
 
@@ -1048,8 +1133,9 @@ sub update_volume_attribute {
 
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
+    my $format = ($class->parse_volname($volname))[6];
     my $path = $class->filesystem_path($scfg, $volname);
-    return file_size_info($path, $timeout);
+    return file_size_info($path, $timeout, $format);
 
 }
 
@@ -1207,11 +1293,20 @@ sub list_images {
 
 	my $owner = $2;
 	my $name = $3;
+	my $format = $4;
 
 	next if !$vollist && defined($vmid) && ($owner ne $vmid);
 
-	my ($size, $format, $used, $parent, $ctime) = file_size_info($fn);
-	next if !($format && defined($size));
+	my ($size, undef, $used, $parent, $ctime) = eval {
+	    file_size_info($fn, undef, $format);
+	};
+	if (my $err = $@) {
+	    die $err if $err !~ m/Image is not in \S+ format$/;
+	    warn "image '$fn' is not in expected format '$format', querying as raw\n";
+	    ($size, undef, $used, $parent, $ctime) = file_size_info($fn, undef, 'raw');
+	    $format = 'invalid';
+	}
+	next if !defined($size);
 
 	my $volid;
 	if ($parent && $parent =~ m!^../(\d+)/([^/]+\.($fmts))$!) {
@@ -1239,7 +1334,7 @@ sub list_images {
     return $res;
 }
 
-# list templates ($tt = <iso|vztmpl|backup|snippets>)
+# list templates ($tt = <iso|vztmpl|backup|snippets|import>)
 my $get_subdir_files = sub {
     my ($sid, $path, $tt, $vmid) = @_;
 
@@ -1295,6 +1390,10 @@ my $get_subdir_files = sub {
 		volid => "$sid:snippets/". basename($fn),
 		format => 'snippet',
 	    };
+	} elsif ($tt eq 'import') {
+	    next if $fn !~ m!/(${PVE::Storage::SAFE_CHAR_CLASS_RE}+$PVE::Storage::IMPORT_EXT_RE_1)$!i;
+
+	    $info = { volid => "$sid:import/$1", format => "$2" };
 	}
 
 	$info->{size} = $st->size;
@@ -1329,6 +1428,8 @@ sub list_volumes {
 		$data = $get_subdir_files->($storeid, $path, 'backup', $vmid);
 	    } elsif ($type eq 'snippets') {
 		$data = $get_subdir_files->($storeid, $path, 'snippets');
+	    } elsif ($type eq 'import') {
+		$data = $get_subdir_files->($storeid, $path, 'import');
 	    }
 	}
 
@@ -1598,8 +1699,9 @@ sub volume_export {
 
     my $err_msg = "volume export format $format not available for $class\n";
     if ($scfg->{path} && !defined($snapshot) && !defined($base_snapshot)) {
-	my $file = $class->path($scfg, $volname, $storeid) or die $err_msg;
-	my ($size, $file_format) = file_size_info($file);
+	my ($file) = $class->path($scfg, $volname, $storeid) or die $err_msg;
+	my $file_format = ($class->parse_volname($volname))[6];
+	my $size = file_size_info($file, undef, $file_format);
 
 	if ($format eq 'raw+size') {
 	    die $err_msg if $with_snapshots || $file_format eq 'subvol';
@@ -1631,9 +1733,10 @@ sub volume_export {
 sub volume_export_formats {
     my ($class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots) = @_;
     if ($scfg->{path} && !defined($snapshot) && !defined($base_snapshot)) {
-	my $file = $class->path($scfg, $volname, $storeid)
+	my ($file) = $class->path($scfg, $volname, $storeid)
 	    or return;
-	my ($size, $format) = file_size_info($file);
+	my $format = ($class->parse_volname($volname))[6];
+	my $size = file_size_info($file, undef, $format);
 
 	if ($with_snapshots) {
 	    return ($format.'+size') if ($format eq 'qcow2' || $format eq 'vmdk');
@@ -1668,7 +1771,7 @@ sub volume_import {
 
     # Check for an existing file first since interrupting alloc_image doesn't
     # free it.
-    my $file = $class->path($scfg, $volname, $storeid);
+    my ($file) = $class->path($scfg, $volname, $storeid);
     if (-e $file) {
 	die "file '$file' already exists\n" if !$allow_rename;
 	warn "file '$file' already exists - importing with a different name\n";
@@ -1676,7 +1779,7 @@ sub volume_import {
     }
 
     my ($size) = read_common_header($fh);
-    $size = int($size/1024);
+    $size = PVE::Storage::Common::align_size_up($size, 1024) / 1024;
 
     eval {
 	my $allocname = $class->alloc_image($storeid, $scfg, $vmid, $file_format, $name, $size);
@@ -1685,7 +1788,7 @@ sub volume_import {
 	if (defined($name) && $allocname ne $oldname) {
 	    die "internal error: unexpected allocated name: '$allocname' != '$oldname'\n";
 	}
-	my $file = $class->path($scfg, $volname, $storeid)
+	my ($file) = $class->path($scfg, $volname, $storeid)
 	    or die "internal error: failed to get path to newly allocated volume $volname\n";
 	if ($data_format eq 'raw' || $data_format eq 'qcow2' || $data_format eq 'vmdk') {
 	    run_command(['dd', "of=$file", 'conv=sparse', 'bs=64k'],

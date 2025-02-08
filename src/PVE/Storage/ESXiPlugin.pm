@@ -418,10 +418,10 @@ sub parse_volname {
     die "failed to parse volname '$volname'\n"
 	if $volname !~ m!^([^/]+)/([^/]+)/(.+)$!;
 
-    return ('import', $volname) if $volname =~ /\.vmx$/;
+    return ('import', $volname, 0, undef, undef, undef, 'vmx') if $volname =~ /\.vmx$/;
 
     my $format = 'raw';
-    $format = 'vmdk'  if $volname =~ /\.vmdk/;
+    $format = 'vmdk' if $volname =~ /\.vmdk$/;
     return ('images', $volname, 0, undef, undef, undef, $format);
 }
 
@@ -535,10 +535,12 @@ sub volume_resize {
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
 
-    return 0 if $volname =~ /\.vmx$/;
+    if ($volname =~ /\.vmx$/) {
+	return wantarray ? (0, 'vmx') : 0;
+    }
 
     my $filename = $class->path($scfg, $volname, $storeid, undef);
-    return PVE::Storage::Plugin::file_size_info($filename, $timeout);
+    return PVE::Storage::Plugin::file_size_info($filename, $timeout, 'auto-detect');
 }
 
 sub volume_snapshot {
@@ -754,7 +756,7 @@ sub manifest { $_[0]->{'pve.manifest'} }
 # (Also used for the fileName config key...)
 sub is_disk_entry : prototype($) {
     my ($id) = @_;
-    if ($id =~ /^(scsi|ide|sata|nvme)(\d+:\d+)(:?\.fileName)?$/) {
+    if ($id =~ /^(scsi|ide|sata|nvme)(\d+:\d+)(:?\.file[nN]ame)?$/) {
 	return ($1, $2);
     }
     return;

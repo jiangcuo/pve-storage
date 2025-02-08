@@ -116,6 +116,14 @@ my @tests = (
 	    'local:backup/vzdump-lxc-16112-2020_03_30-21_39_30.tar.zst'
 	],
     },
+    {
+	description => 'Backup, tar.bz2',
+	volname     => "$storage_dir/dump/vzdump-openvz-16112-2020_03_30-21_39_30.tar.bz2",
+	expected    => [
+	    'backup',
+	    'local:backup/vzdump-openvz-16112-2020_03_30-21_39_30.tar.bz2',
+	],
+    },
 
     {
 	description => 'ISO file',
@@ -131,6 +139,14 @@ my @tests = (
 	expected    => [
 	    'vztmpl',
 	    'local:vztmpl/debian-10.0-standard_10.0-1_amd64.tar.gz',
+	],
+    },
+    {
+	description => 'CT template, wrong ending, tar bz2',
+	volname     => "$storage_dir/template/cache/debian-10.0-standard_10.0-1_amd64.tar.bz2",
+	expected    => [
+	    'vztmpl',
+	    'local:vztmpl/debian-10.0-standard_10.0-1_amd64.tar.bz2',
 	],
     },
 
@@ -174,6 +190,22 @@ my @tests = (
 	    'local:vztmpl/debian-10.0-standard_10.0-1_amd64.tar.xz',
 	],
     },
+    {
+	description => 'Import, ova',
+	volname     => "$storage_dir/import/import.ova",
+	expected    => [
+	    'import',
+	    'local:import/import.ova',
+	],
+    },
+    {
+	description => 'Import, ovf',
+	volname     => "$storage_dir/import/import.ovf",
+	expected    => [
+	    'import',
+	    'local:import/import.ovf',
+	],
+    },
 
     # no matches, path or files with failures
     {
@@ -192,18 +224,8 @@ my @tests = (
 	expected    => [''],
     },
     {
-	description => 'CT template, wrong ending, tar bz2',
-	volname     => "$storage_dir/template/cache/debian-10.0-standard_10.0-1_amd64.tar.bz2",
-	expected    => [''],
-    },
-    {
 	description => 'Rootdir as subvol, wrong path',
 	volname     => "$storage_dir/private/subvol-19254-disk-0/",
-	expected    => [''],
-    },
-    {
-	description => 'Backup, wrong ending, openvz, tar.bz2',
-	volname     => "$storage_dir/dump/vzdump-openvz-16112-2020_03_30-21_39_30.tar.bz2",
 	expected    => [''],
     },
     {
@@ -229,6 +251,11 @@ my @tests = (
     {
 	description => 'Image, string as vmid in folder name',
 	volname     => "$storage_dir/images/ssss/vm-1234-disk-0.qcow2",
+	expected    => [''],
+    },
+    {
+	description => 'Import, non ova/ovf/disk image in import dir',
+	volname     => "$storage_dir/import/test.foo",
 	expected    => [''],
     },
 );

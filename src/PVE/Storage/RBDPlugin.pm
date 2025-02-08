@@ -18,6 +18,8 @@ use PVE::RPCEnvironment;
 use PVE::Storage::Plugin;
 use PVE::Tools qw(run_command trim file_read_firstline);
 
+use PVE::Storage::Common;
+
 use base qw(PVE::Storage::Plugin);
 
 my $get_parent_image_name = sub {
@@ -88,7 +90,13 @@ my $build_cmd = sub {
     my $cmd_option = PVE::CephConfig::ceph_connect_option($scfg, $storeid);
     my $pool =  $scfg->{pool} ? $scfg->{pool} : 'rbd';
 
-    my $cmd = [$binary, '-p', $pool];
+
+    my $cmd = [$binary];
+    if ($op eq 'import') {
+	push $cmd->@*, '--dest-pool', $pool;
+    } else {
+	push $cmd->@*, '-p', $pool;
+    }
 
     if (defined(my $namespace = $scfg->{namespace})) {
 	# some subcommands will fail if the --namespace parameter is present
@@ -208,12 +216,7 @@ sub rbd_ls {
     my $parser = sub { $raw .= shift };
 
     my $cmd = $rbd_cmd->($scfg, $storeid, 'ls', '-l', '--format', 'json');
-    eval {
-	run_rbd_command($cmd, errmsg => "rbd error", errfunc => sub {}, outfunc => $parser);
-    };
-    my $err = $@;
-
-    die $err if $err && $err !~ m/doesn't contain rbd images/ ;
+    run_rbd_command($cmd, errmsg => "rbd error", errfunc => sub {}, outfunc => $parser);
 
     my $result;
     if ($raw eq '') {
@@ -348,6 +351,29 @@ sub rbd_volume_du {
     die "got no matching image from rbd du\n";
 }
 
+my sub rbd_volume_exists {
+    my ($scfg, $storeid, $volname) = @_;
+
+    my $cmd = $rbd_cmd->($scfg, $storeid, 'ls', '--format', 'json');
+    my $raw = '';
+    run_rbd_command(
+	$cmd, errmsg => "rbd error", errfunc => sub {}, outfunc => sub { $raw .= shift; });
+
+    my $list;
+    if ($raw =~ m/^(\[.*\])$/s) { # untaint
+	$list = eval { JSON::decode_json($1); };
+	die "invalid JSON output from 'rbd ls': $@\n" if $@;
+    } else {
+	die "got unexpected data from 'rbd ls': '$raw'\n";
+    }
+
+    for my $name ($list->@*) {
+	return 1 if $name eq $volname;
+    }
+
+    return 0;
+}
+
 # Configuration
 
 sub type {
@@ -389,6 +415,7 @@ sub properties {
 	krbd => {
 	    description => "Always access rbd through krbd kernel module.",
 	    type => 'boolean',
+	    default => 0,
 	},
 	keyring => {
 	    description => "Client keyring contents (for external clusters).",
@@ -853,6 +880,100 @@ sub volume_has_feature {
     return undef;
 }
 
+sub volume_export_formats {
+    my ($class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots) = @_;
+
+    return $class->volume_import_formats(
+	$scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots);
+}
+
+sub volume_export {
+    my (
+	$class,
+	$scfg,
+	$storeid,
+	$fh,
+	$volname,
+	$format,
+	$snapshot,
+	$base_snapshot,
+	$with_snapshots,
+    ) = @_;
+
+    die "volume export format $format not available for $class\n" if $format ne 'raw+size';
+    die "cannot export volumes together with their snapshots in $class\n" if $with_snapshots;
+    die "cannot export an incremental stream in $class\n" if defined($base_snapshot);
+
+    my ($size) = $class->volume_size_info($scfg, $storeid, $volname);
+    PVE::Storage::Plugin::write_common_header($fh, $size);
+    my $cmd = $rbd_cmd->($scfg, $storeid, 'export', '--export-format', '1', $volname, '-');
+    run_rbd_command(
+	$cmd,
+	errmsg => 'could not export image',
+	output => '>&'.fileno($fh),
+    );
+
+    return;
+}
+
+sub volume_import_formats {
+    my ($class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots) = @_;
+    return () if $with_snapshots; # not supported
+    return () if defined($base_snapshot); # not supported
+    return ('raw+size');
+}
+
+sub volume_import {
+    my (
+	$class,
+	$scfg,
+	$storeid,
+	$fh,
+	$volname,
+	$format,
+	$snapshot,
+	$base_snapshot,
+	$with_snapshots,
+	$allow_rename,
+    ) = @_;
+
+    die "volume import format $format not available for $class\n" if $format ne 'raw+size';
+    die "cannot import volumes together with their snapshots in $class\n" if $with_snapshots;
+    die "cannot import an incremental stream in $class\n" if defined($base_snapshot);
+
+    my (undef, $name, $vmid, undef, undef, undef, $file_format) = $class->parse_volname($volname);
+    die "cannot import format $format into a volume of format $file_format\n"
+	if $file_format ne 'raw';
+
+    if (rbd_volume_exists($scfg, $storeid, $name)) {
+	die "volume $name already exists\n" if !$allow_rename;
+	warn "volume $name already exists - importing with a different name\n";
+	$volname = $class->find_free_diskname($storeid, $scfg, $vmid, $file_format);
+    }
+
+    my ($size) = PVE::Storage::Plugin::read_common_header($fh);
+    $size = PVE::Storage::Common::align_size_up($size, 1024) / 1024;
+
+    eval {
+	my $cmd = $rbd_cmd->($scfg, $storeid, 'import', '--export-format', '1', '-', $volname);
+	run_rbd_command(
+	    $cmd,
+	    errmsg => 'could not import image',
+	    input => '<&'.fileno($fh),
+	);
+    };
+    if (my $err = $@) {
+	# FIXME there is a slight race between finding the free disk name and removal here
+	# Does not only affect this plugin, see:
+	# https://lore.proxmox.com/pve-devel/20240403150712.262773-1-h.duerr@proxmox.com/
+	eval { $class->free_image($storeid, $scfg, $volname, 0, $file_format); };
+	warn $@ if $@;
+	die $err;
+    }
+
+    return "$storeid:$volname";
+}
+
 sub rename_volume {
     my ($class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname) = @_;
 
@@ -868,11 +989,8 @@ sub rename_volume {
     $target_volname = $class->find_free_diskname($storeid, $scfg, $target_vmid, $format)
 	if !$target_volname;
 
-    eval {
-	my $cmd = $rbd_cmd->($scfg, $storeid, 'info', $target_volname);
-	run_rbd_command($cmd, errmsg => "exist check",  quiet => 1);
-    };
-    die "target volume '${target_volname}' already exists\n" if !$@;
+    die "target volume '${target_volname}' already exists\n"
+	if rbd_volume_exists($scfg, $storeid, $target_volname);
 
     my $cmd = $rbd_cmd->($scfg, $storeid, 'rename', $source_image, $target_volname);
 

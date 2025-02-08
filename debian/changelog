@@ -1,3 +1,130 @@
+libpve-storage-perl (8.3.3) bookworm; urgency=medium
+
+  * plugin: export/import: fix calls to path() method
+
+  * rbd plugin: schema: document default value for 'krbd' setting
+
+  * export: redirect stdout to avoid any unrelated messages ending up in the export stream
+
+  * rbd plugin: implement volume import/export (partially fix #5890)
+
+  * rbd plugin: improve volume exists helper
+
+  * iscsi plugin: support volume export
+
+  * iscsi direct plugin: support volume export
+
+  * common: introduce common module
+
+  * plugins: volume import: align size up to 1KiB
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 19 Dec 2024 15:11:41 +0100
+
+libpve-storage-perl (8.3.2) bookworm; urgency=medium
+
+  * btrfs: fix regression for handling non-images volumes
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 11 Dec 2024 15:29:38 +0100
+
+libpve-storage-perl (8.3.1) bookworm; urgency=medium
+
+  * esxi: anchor vmdk regex in `parse_volname`
+
+  * esxi: fix return value of volume_size_info for vmx volumes
+
+  * storage: plugin: return 'raw' format when parsing non-image volumes
+
+  * file_size_info: add warning when falling back to raw format
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 10 Dec 2024 14:32:01 +0100
+
+libpve-storage-perl (8.3.0) bookworm; urgency=medium
+
+  * file_size_info: avoid spurious warnings by always setting `format`
+    parameter
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 09 Dec 2024 12:00:12 +0100
+
+libpve-storage-perl (8.2.10) bookworm; urgency=medium
+
+  * file_size_info: add format parameter and checks
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 09 Dec 2024 10:08:45 +0100
+
+libpve-storage-perl (8.2.9) bookworm; urgency=medium
+
+  * untrusted image checks: also handle multi-part vmdk files, to harden the
+    new import OVA through API feature also for VMDK backed images.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 19 Nov 2024 21:05:43 +0100
+
+libpve-storage-perl (8.2.8) bookworm; urgency=medium
+
+  * directory backed storage: implement import content type to support
+    uploading and importing OVA images.
+
+  * various improvements to the OVF parser to better support parsing basic
+    resources and also improve coping  with more quirks from OVA images.
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 18 Nov 2024 21:11:43 +0100
+
+libpve-storage-perl (8.2.7) bookworm; urgency=medium
+
+  * file size info: implement untrusted mode to check some extra attributes
+    for files that originate from outside the PVE storage system.
+
+  * move OVF module over from qemu-server
+
+  * api: iso up/download: check file content to prevent users from uploading
+    files that they then cannot use as an ISO or raw image.
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 18 Nov 2024 15:51:20 +0100
+
+libpve-storage-perl (8.2.6) bookworm; urgency=medium
+
+  * iscsi: disable Open-iSCSI login retries to reduce timeout to 15s, logins
+    will be already retried on a higher level (pvestatd).
+
+  * fix #5267: storage: add bzip2 support to volumes that already support some
+    compression like VM images or ISOs, Container templates, or backup
+    archives.
+
+  * iscsi: fix activation of second iSCSI storage on other cluster nodes.
+
+  * iscsi: disallow slashes in volume name
+
+  * iscsi: verify volume disks are part of target to harden against
+    misconfiguration.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 13 Nov 2024 16:19:43 +0100
+
+libpve-storage-perl (8.2.5) bookworm; urgency=medium
+
+  * api: annotate file-restore endpoint as download-enabled
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 23 Sep 2024 11:23:12 +0200
+
+libpve-storage-perl (8.2.4) bookworm; urgency=medium
+
+  * volume import: assume target API version is at least 9, which is supported
+    since the initial Proxmox VE 7.0 release. This allows removing some code
+    while keeping our upgrade path from 7 to 8.
+
+  * btrfs: log executed command on failures
+
+  * fix #5587: esxi: add support for more variants of how the VMX file
+    references disk file paths, allowing some nore niche use case like, e.g.,
+    importing VMs from ESXi that where originally created on (older versions)
+    of the VMWare Player application.
+
+  * fix #4272: btrfs: expose the ability to change the owner of a guest image
+    backed by a btrfs storage.
+
+  * file size info query: avoid false-positive error when the qemu-img command
+    fails to return any output, which most often indicates that it timed out
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 12 Sep 2024 12:26:15 +0200
+
 libpve-storage-perl (8.2.3) bookworm; urgency=medium
 
   * esxi: revert change to error handling from the fuse mount tool which would
