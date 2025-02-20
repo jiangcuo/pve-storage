@@ -622,6 +622,43 @@ sub clone_image {
     return $newvol;
 }
 
+sub clone_image_pxvirt {
+    my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
+
+    my $snap = '__base__';
+    $snap = $snapname if length $snapname;
+
+    my ($vtype, $basename, $basevmid, undef, undef, $isBase) =
+        $class->parse_volname($volname);
+
+    my $name = $class->find_free_diskname($storeid, $scfg, $vmid);
+
+    warn "clone $volname: $basename snapname $snap to $name\n";
+
+    if (length($snapname)) {
+	my (undef, undef, undef, $protected) = rbd_volume_info($scfg, $storeid, $volname, $snapname);
+
+	if (!$protected) {
+	    my $cmd = $rbd_cmd->($scfg, $storeid, 'snap', 'protect', $volname, '--snap', $snapname);
+	    run_rbd_command($cmd, errmsg => "rbd protect $volname snap $snapname error");
+	}
+    }
+
+    my $newvol = "$basename/$name";
+    $newvol = $name if length($snapname);
+
+    my @options = (
+	get_rbd_path($scfg, $basename),
+	'--snap', $snap,
+    );
+    push @options, ('--data-pool', $scfg->{'data-pool'}) if $scfg->{'data-pool'};
+
+    my $cmd = $rbd_cmd->($scfg, $storeid, 'clone', @options, get_rbd_path($scfg, $name));
+    run_rbd_command($cmd, errmsg => "rbd clone '$basename' error");
+
+    return $newvol;
+}
+
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 

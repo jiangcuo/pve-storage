@@ -872,6 +872,49 @@ sub clone_image {
     return $newvol;
 }
 
+
+sub clone_image_pxvirt {
+    my ($class, $scfg, $storeid, $volname, $vmid, $snap) = @_;
+
+    # this only works for file based storage types
+    die "storage definition has no path\n" if !$scfg->{path};
+
+    my ($vtype, $basename, $basevmid, undef, undef, $isBase, $format) =
+	$class->parse_volname($volname);
+
+    die "clone_image on wrong vtype '$vtype'\n" if $vtype ne 'images';
+
+    die "this storage type does not support clone_image on subvolumes\n" if $format eq 'subvol';
+
+    my $imagedir = $class->get_subdir($scfg, 'images');
+    $imagedir .= "/$vmid";
+
+    mkpath $imagedir;
+
+    my $name = $class->find_free_diskname($storeid, $scfg, $vmid, "qcow2", 1);
+
+    warn "clone $volname: $vtype, $name, $vmid to $name (base=../$basevmid/$basename)\n";
+
+    my $newvol = "$vmid/$name";
+
+    my $path = $class->filesystem_path($scfg, $newvol);
+
+    # Note: we use relative paths, so we need to call chdir before qemu-img
+    eval {
+	local $CWD = $imagedir;
+
+	my $cmd = ['/usr/bin/qemu-img', 'create', '-b', "../$basevmid/$basename",
+		   '-F', $format, '-f', 'qcow2', $path];
+
+	run_command($cmd);
+    };
+    my $err = $@;
+
+    die $err if $err;
+
+    return $newvol;
+}
+
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
