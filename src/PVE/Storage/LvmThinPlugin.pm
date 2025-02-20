@@ -316,6 +316,31 @@ sub clone_image {
     return $name;
 }
 
+sub clone_image_pxvirt {
+    my ($class, $scfg, $storeid, $volname, $vmid, $snap) = @_;
+
+    my $vg = $scfg->{vgname};
+
+    my $lv;
+
+    if ($snap) {
+	$lv = "$vg/snap_${volname}_$snap";
+    } else {
+	my ($vtype, undef, undef, undef, undef, $isBase, $format) =
+	    $class->parse_volname($volname);
+
+
+	$lv = "$vg/$volname";
+    }
+
+    my $name = $class->find_free_diskname($storeid, $scfg, $vmid);
+
+    my $cmd = ['/sbin/lvcreate', '-n', $name, '-prw', '-kn', '-s', $lv];
+    run_command($cmd, errmsg => "clone image '$lv' error");
+
+    return $name;
+}
+
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
 

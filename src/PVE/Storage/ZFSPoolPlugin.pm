@@ -682,6 +682,27 @@ sub clone_image {
     return "$basename/$name";
 }
 
+sub clone_image_pxvirt {
+    my ($class, $scfg, $storeid, $volname, $vmid, $snap) = @_;
+
+    $snap ||= '__base__';
+
+    my ($vtype, $basename, $basevmid, undef, undef, $isBase, $format) =
+        $class->parse_volname($volname);
+
+    my $name = $class->find_free_diskname($storeid, $scfg, $vmid, $format);
+
+    if ($format eq 'subvol') {
+	my $size = $class->zfs_request($scfg, undef, 'list', '-Hp', '-o', 'refquota', "$scfg->{pool}/$basename");
+	chomp($size);
+	$class->zfs_request($scfg, undef, 'clone', "$scfg->{pool}/$basename\@$snap", "$scfg->{pool}/$name", '-o', "refquota=$size");
+    } else {
+	$class->zfs_request($scfg, undef, 'clone', "$scfg->{pool}/$basename\@$snap", "$scfg->{pool}/$name");
+    }
+
+    return "$name";
+}
+
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
 
