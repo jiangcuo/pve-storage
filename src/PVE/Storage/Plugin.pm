@@ -882,6 +882,8 @@ sub clone_image_pxvirt {
     my ($vtype, $basename, $basevmid, undef, undef, $isBase, $format) =
 	$class->parse_volname($volname);
 
+	die "clone_image only works on ZFS/LVMthin/cephrbd\n" if !$isBase;
+
     die "clone_image on wrong vtype '$vtype'\n" if $vtype ne 'images';
 
     die "this storage type does not support clone_image on subvolumes\n" if $format eq 'subvol';
