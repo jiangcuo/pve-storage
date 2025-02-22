@@ -1,7 +1,7 @@
 Source: libpve-storage-perl
 Section: perl
 Priority: optional
-Maintainer: Proxmox Support Team <support@proxmox.com>
+Maintainer: Lierfang Support Team <itsupport@lierfang.com>
 Build-Depends: debhelper-compat (= 13),
                libfile-chdir-perl,
                libposix-strptime-perl,
@@ -18,7 +18,7 @@ Build-Depends: debhelper-compat (= 13),
                pve-qemu-kvm | qemu-utils,
                zfsutils-linux,
 Standards-Version: 4.6.2
-Homepage: https://www.proxmox.com
+Homepage: https://www.lierfang.com
 
 Package: libpve-storage-perl
 Architecture: all
