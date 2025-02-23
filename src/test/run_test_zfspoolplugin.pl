@@ -2180,7 +2180,7 @@ my $test3 = sub {
     }
 
     eval {
-	if (PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$vmdisk", 'test', 0)) {
+	if (!PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$vmdisk", 'test', 0)) {
 	    $count++;
 	    warn "Test3 g1 failed";
 	}
@@ -2191,7 +2191,7 @@ my $test3 = sub {
     }
 
     eval {
-	if (PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$vmbase", 'test', 0)) {
+	if (!PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$vmbase", 'test', 0)) {
 	    $count++;
 	    warn "Test3 h1 failed";
 	}
@@ -2202,7 +2202,7 @@ my $test3 = sub {
     }
 
     eval {
-	if (PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$vmbase\/$vmlinked", 'test', 0)) {
+	if (!PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$vmbase\/$vmlinked", 'test', 0)) {
 	    $count++;
 	    warn "Test3 h1 failed";
 	}
@@ -2213,7 +2213,7 @@ my $test3 = sub {
     }
 
     eval {
-	if (PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$ctdisk", 'test', 0)) {
+	if (!PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$ctdisk", 'test', 0)) {
 	    $count++;
 	    warn "Test3 i1 failed";
 	}
@@ -2224,7 +2224,7 @@ my $test3 = sub {
     }
 
     eval {
-	if (PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$ctbase", 'test', 0)) {
+	if (!PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$ctbase", 'test', 0)) {
 	    $count++;
 	    warn "Test3 j1 failed";
 	}
@@ -2235,7 +2235,7 @@ my $test3 = sub {
     }
 
     eval {
-	if (PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$ctbase\/$ctlinked", 'test', 0)) {
+	if (!PVE::Storage::volume_has_feature($cfg, 'clone', "$storagename:$ctbase\/$ctlinked", 'test', 0)) {
 	    $count++;
 	    warn "Test3 k1 failed";
 	}

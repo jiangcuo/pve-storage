@@ -730,7 +730,7 @@ sub volume_has_feature {
 
     my $features = {
 	snapshot => { current => 1, snap => 1},
-	clone => { base => 1},
+	clone => { base => 1 , snap => 1}, # we add snap features for link clone  .
 	template => { current => 1},
 	copy => { base => 1, current => 1},
 	sparseinit => { base => 1, current => 1},
