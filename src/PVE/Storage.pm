@@ -1125,6 +1125,24 @@ sub vdisk_clone {
     );
 }
 
+sub vdisk_clone_pxvirt{
+    my ($cfg, $volid, $vmid, $snap) = @_;
+
+    my ($storeid, $volname) = parse_volume_id($volid);
+
+    my $scfg = storage_config($cfg, $storeid);
+
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    activate_storage($cfg, $storeid);
+
+    # lock shared storage
+    return $plugin->cluster_lock_storage($storeid, $scfg->{shared}, undef, sub {
+        my $volname = $plugin->clone_image_pxvirt($scfg, $storeid, $volname, $vmid, $snap);
+        return "$storeid:$volname";
+    });
+}
+
 sub vdisk_create_base {
     my ($cfg, $volid) = @_;
 
