@@ -363,7 +363,9 @@ sub get_sysdir_size {
 sub get_sysdir_info {
     my ($sysdir) = @_;
 
-    return if ! -d "$sysdir/device";
+    if ($sysdir !~ /bcache\d+/ && ! -d "$sysdir/device") {
+        return;
+    }
 
     my $data = {};
 
@@ -374,7 +376,11 @@ sub get_sysdir_info {
 
     $data->{vendor} = file_read_firstline("$sysdir/device/vendor") || 'unknown';
     $data->{model} = file_read_firstline("$sysdir/device/model") || 'unknown';
-
+    if ($sysdir =~ /bcache\d+/){
+        $data->{vendor} = 'bcache';
+        $data->{model} = file_read_firstline("$sysdir/bcache/backing_dev_name") || 'unknown';
+        $data->{serial} = file_read_firstline("$sysdir/bcache/state") || 'unknown';
+    }
     return $data;
 }
 
@@ -522,7 +528,10 @@ sub get_disks {
 	# - cciss!cXnY  cciss devices
 	return if $dev !~ m/^(h|s|x?v)d[a-z]+$/ &&
 		  $dev !~ m/^nvme\d+n\d+$/ &&
-		  $dev !~ m/^cciss\!c\d+d\d+$/;
+		  $dev !~ m/^cciss\!c\d+d\d+$/ &&
+		  $dev !~ m/^mmcblk\d+n\d+$/ &&
+		  $dev !~ m/^nbd\d+n\d+$/ &&
+		  $dev !~ /bcache\d+/;
 
 	my $data = get_udev_info("/sys/block/$dev") // return;
 	my $devpath = $data->{devpath};
