@@ -25,6 +25,8 @@ pvesm.zsh-completion:
 install: pvesm.1 pvesm.bash-completion pvesm.zsh-completion
 	install -d $(DESTDIR)$(SBINDIR)
 	install -m 0755 pvesm $(DESTDIR)$(SBINDIR)
+	install -m 0755 pvebcache $(DESTDIR)$(SBINDIR)
+	install -m 0755 pvebcache  $(DESTDIR)$(SBINDIR)
 	install -d $(DESTDIR)$(MAN1DIR)
 	install -m 0644 pvesm.1 $(DESTDIR)$(MAN1DIR)
 	gzip -9 -n $(DESTDIR)$(MAN1DIR)/pvesm.1
