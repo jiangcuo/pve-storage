@@ -400,9 +400,7 @@ sub get_sysdir_size {
 sub get_sysdir_info {
     my ($sysdir) = @_;
 
-    if ($sysdir !~ /bcache\d+/ && ! -d "$sysdir/device") {
-    	return;
-    }
+    return if ! -d "$sysdir/device";
 
     my $data = {};
 
@@ -413,11 +411,7 @@ sub get_sysdir_info {
 
     $data->{vendor} = file_read_firstline("$sysdir/device/vendor") || 'unknown';
     $data->{model} = file_read_firstline("$sysdir/device/model") || 'unknown';
-    if ($sysdir =~ /bcache\d+/){
-    	$data->{vendor} = 'bcache';
-    	$data->{model} = file_read_firstline("$sysdir/bcache/backing_dev_name") || 'unknown';
-    	$data->{serial} = file_read_firstline("$sysdir/bcache/state") || 'unknown';
-    }
+
     return $data;
 }
 
@@ -565,8 +559,7 @@ sub get_disks {
 	# - cciss!cXnY  cciss devices
 	return if $dev !~ m/^(h|s|x?v)d[a-z]+$/ &&
 		  $dev !~ m/^nvme\d+n\d+$/ &&
-		  $dev !~ m/^cciss\!c\d+d\d+$/ &&
-		  $dev !~ /bcache\d+/;
+		  $dev !~ m/^cciss\!c\d+d\d+$/;
 
             my $data = get_udev_info("/sys/block/$dev") // return;
             my $devpath = $data->{devpath};
@@ -992,5 +985,156 @@ sub udevadm_trigger {
     eval { run_command(['udevadm', 'trigger', @devs]); };
     warn $@ if $@;
 }
+
+
+sub scan_bcache_device {
+	my ($showtype) = @_;
+	my $ddd = []; 
+	my $res = get_lsblk_info();
+    foreach my $device (keys %$res) {
+        if ($res->{$device}{'fstype'} && $res->{$device}{'fstype'} eq 'bcache') {
+            my $d = {};  # 在这里创建新的哈希引用
+			my $name = basename($device);
+			#num1
+			my $disktype = "backend";
+			if ( -d "/sys/block/$name/bcache/set") {
+				$disktype = "cache";
+			}
+			if ($showtype ne 'all' && ($showtype ne $disktype)){
+				next;
+			}
+			#num2
+			$d->{type} = $disktype;
+
+			my $state = "Running";
+
+			if ( ! -d "/sys/block/$name/bcache/") {
+				$state = "Stopped";
+			}
+			#num3
+			$d->{state} = $state; 
+			my $cachemode = "unknown";
+			my $backenddev = "unknown";
+			my $cache = "unknown";
+			if ( $disktype eq 'backend' && ( $showtype eq 'all' || $showtype eq $disktype  )){
+				if ( $state ne 'Stopped'){
+					$d->{backing_dev} = file_read_firstline("/sys/block/$name/bcache/backing_dev_name");
+					$d->{backing_dev_uuid} = file_read_firstline("/sys/block/$name/bcache/backing_dev_uuid");
+					$d->{cache_status} = file_read_firstline("/sys/block/$name/state");
+					$cachemode = file_read_firstline("/sys/block/$name/bcache/cache_mode");
+					if ( $cachemode && $cachemode =~ /\[(.*?)\]/) {
+						$cachemode = $1; 
+					}
+					my $path = realpath("/sys/block/$name/bcache/dev");
+					$backenddev = $name;
+					$name = basename($path);
+					if ( -d "/sys/block/$name/bcache/cache"){
+						$cache = basename(realpath("/sys/block/$name/bcache/cache/cache0/../"));
+					}
+				}else{
+					$backenddev = $name;
+				}
+			}
+            $d->{name} = $name;
+			$d->{'backend-dev'} = $backenddev;
+			$d->{cachemode} = $cachemode;
+			$d->{'cache-dev'} = $cache;
+
+            my $size = int(file_read_firstline("/sys/block/$name/size")) * 512;
+            $size = PVE::Tools::convert_size($size, 'b' => 'GB');
+			$d->{size} = $size . "GB"; 
+
+            push @$ddd, $d;
+        }
+    }
+
+	#print  Dumper($ddd);
+	@$ddd = sort { $a->{name} cmp $b->{name} } @$ddd;
+    return  $ddd;
+}
+
+
+sub get_devices_by_uuid {
+    my ($lsblk_info, $uuids, $res) = @_;
+
+    $res = {} if !defined($res);
+
+    foreach my $dev (sort keys %{$lsblk_info}) {
+	my $uuid = $lsblk_info->{$dev}->{uuid};
+	next if !defined($uuid) || !defined($uuids->{$uuid});
+	$res->{$dev} = $uuids->{$uuid};
+    }
+
+    return $res;
+}
+
+
+sub get_bcache_cache_dev(){
+	my ($cachedev) = @_;
+	if ($cachedev =~ m{^/dev/}) {
+		$cachedev = basename($cachedev);
+		die "$cachedev is not a bcache dev!\n" if (! -d "/sys/block/$cachedev/bcache/set");
+		$cachedev = basename(realpath("/sys/block/$cachedev/bcache/set"));
+	} elsif (is_uuid($cachedev)){
+		die "uuid $cachedev not a cache dev!\n" if (! -d "/sys/fs/bcache/$cachedev/");
+	} else  {
+		die "cache $cachedev dev is not a cache device!\n" if ! -d "/sys/block/$cachedev/bcache/set";
+		$cachedev = basename(realpath("/sys/block/$cachedev/bcache/set"));
+	}
+	return $cachedev;
+}
+
+sub check_bcache_cache_dev(){
+	my ($cachedev) = @_;
+	if (is_uuid($cachedev)){
+		return 0 if (! -d "/sys/fs/bcache/$cachedev/");
+	}else{
+		return 0 if (! -d "/sys/block/$cachedev/bcache/set");
+	}
+	return 1;
+}
+
+sub get_bcache_backend_dev(){
+	my ($backenddev) = @_;
+	if ($backenddev =~ m{^/dev/}) {
+		$backenddev = basename($backenddev);
+	}
+	die "backend $backenddev dev is not a bcache device!\n"  if ! -d "/sys/block/$backenddev/bcache/"; 
+	return $backenddev;
+}
+
+sub check_bcache_cache_is_inuse(){
+	my ($cache) = @_;
+	my @bdev = glob("/sys/fs/bcache/$cache/bdev*");
+	die "cache dev $cache is in use!\n" if scalar @bdev > 0;
+}
+
+sub get_disk_name(){
+	my ($dev) = @_;
+	if ($dev =~ m{^/dev/}) {
+		$dev = basename($dev);
+	}
+	die "$dev is not a blockdev!\n" if !PVE::Diskmanage::verify_blockdev_path("/dev/$dev");
+	return $dev;
+}
+
+sub get_bcache_cache_name(){
+	my ($dev) = @_;
+	if ($dev =~ m{^/dev/}) {
+		$dev = basename($dev);
+	} elsif (is_uuid($dev)) {
+		die "$dev is not a bcache,can't use uuid format!\n" if (! -d "/sys/fs/bcache/$dev/");
+		$dev = bcache_cache_uuid_to_dev($dev);
+	}
+	die "$dev is not a blockdev!\n" if !PVE::Diskmanage::verify_blockdev_path("/dev/$dev");
+	return $dev;
+}
+
+sub bcache_cache_uuid_to_dev(){
+	my ($dev) = @_;
+	return basename(realpath("/sys/fs/bcache/$dev/cache0/../"));
+}
+
+
 
 1;

@@ -1,0 +1,8 @@
+#!/usr/bin/perl -T
+
+use strict;
+use warnings;
+
+use PVE::CLI::pvebcache;
+
+PVE::CLI::pvebcache->run_cli_handler();
