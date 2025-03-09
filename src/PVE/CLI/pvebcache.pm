@@ -509,32 +509,4 @@ our $cmddef = {
 };
 
 
-
-sub is_uuid {
-    my ($uuid) = @_;
-    my $uuid_regex = qr/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    return $uuid =~ $uuid_regex;
-}
-
-sub get_lsblk_info {
-    my $cmd = [$LSBLK, '--json', '-o', 'path,parttype,uuid,fstype'];
-    my $output = "";
-    eval { run_command($cmd, outfunc => sub { $output .= "$_[0]\n"; }) };
-    warn "$@\n" if $@;
-    return {} if $output eq '';
-    my $parsed = eval { decode_json($output) } // {};
-    warn "$@\n" if $@;
-    my $list = $parsed->{blockdevices} // [];
-
-    return {
-	map {
-	    $_->{path} => {
-		parttype => $_->{parttype},
-		fstype => $_->{fstype},
-		uuid => $_->{uuid}
-	    }
-	} @{$list}
-    };
-}
-
 1;
