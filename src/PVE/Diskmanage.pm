@@ -5,7 +5,7 @@ use warnings;
 
 use PVE::ProcFSTools;
 use Data::Dumper;
-use Cwd qw(abs_path);
+use Cwd qw(abs_path realpath);
 use Fcntl ':mode';
 use File::Basename;
 use File::stat;
@@ -936,24 +936,26 @@ sub scan_bcache_device {
 	my $res = get_lsblk_info();
     foreach my $device (keys %$res) {
         if ($res->{$device}{'fstype'} && $res->{$device}{'fstype'} eq 'bcache') {
-            my $d = {};  # 在这里创建新的哈希引用
+            my $d = {}; 
 			my $name = basename($device);
-			#num1
+			
+			my $state = "Running";
 			my $disktype = "backend";
+
+			if ( ! -d "/sys/block/$name/bcache/") {
+				$state = "Stopped";
+				$disktype = "unknown";
+			}
 			if ( -d "/sys/block/$name/bcache/set") {
 				$disktype = "cache";
 			}
 			if ($showtype ne 'all' && ($showtype ne $disktype)){
 				next;
 			}
-			#num2
+			
 			$d->{type} = $disktype;
 
-			my $state = "Running";
 
-			if ( ! -d "/sys/block/$name/bcache/") {
-				$state = "Stopped";
-			}
 			#num3
 			$d->{state} = $state; 
 			my $cachemode = "unknown";
@@ -1012,7 +1014,7 @@ sub get_devices_by_uuid {
 }
 
 
-sub get_bcache_cache_dev(){
+sub get_bcache_cache_dev {
 	my ($cachedev) = @_;
 	if ($cachedev =~ m{^/dev/}) {
 		$cachedev = basename($cachedev);
@@ -1027,7 +1029,7 @@ sub get_bcache_cache_dev(){
 	return $cachedev;
 }
 
-sub check_bcache_cache_dev(){
+sub check_bcache_cache_dev {
 	my ($cachedev) = @_;
 	if (is_uuid($cachedev)){
 		return 0 if (! -d "/sys/fs/bcache/$cachedev/");
@@ -1037,7 +1039,13 @@ sub check_bcache_cache_dev(){
 	return 1;
 }
 
-sub get_bcache_backend_dev(){
+sub is_uuid {
+    my ($uuid) = @_;
+    my $uuid_regex = qr/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return $uuid =~ $uuid_regex;
+}
+
+sub get_bcache_backend_dev {
 	my ($backenddev) = @_;
 	if ($backenddev =~ m{^/dev/}) {
 		$backenddev = basename($backenddev);
@@ -1046,13 +1054,13 @@ sub get_bcache_backend_dev(){
 	return $backenddev;
 }
 
-sub check_bcache_cache_is_inuse(){
+sub check_bcache_cache_is_inuse {
 	my ($cache) = @_;
 	my @bdev = glob("/sys/fs/bcache/$cache/bdev*");
 	die "cache dev $cache is in use!\n" if scalar @bdev > 0;
 }
 
-sub get_disk_name(){
+sub get_disk_name {
 	my ($dev) = @_;
 	if ($dev =~ m{^/dev/}) {
 		$dev = basename($dev);
@@ -1061,7 +1069,7 @@ sub get_disk_name(){
 	return $dev;
 }
 
-sub get_bcache_cache_name(){
+sub get_bcache_cache_name {
 	my ($dev) = @_;
 	if ($dev =~ m{^/dev/}) {
 		$dev = basename($dev);
@@ -1073,7 +1081,7 @@ sub get_bcache_cache_name(){
 	return $dev;
 }
 
-sub bcache_cache_uuid_to_dev(){
+sub bcache_cache_uuid_to_dev {
 	my ($dev) = @_;
 	return basename(realpath("/sys/fs/bcache/$dev/cache0/../"));
 }
