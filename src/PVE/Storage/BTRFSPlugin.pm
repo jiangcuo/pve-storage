@@ -405,18 +405,20 @@ my sub path_is_subvolume : prototype($) {
     return S_ISDIR($mode) && $ino == BTRFS_FIRST_FREE_OBJECTID;
 }
 
-my $BTRFS_VOL_REGEX = qr/((?:vm|base|subvol)-\d+-disk-\d+(?:\.subvol)?)(?:\@(\S+))$/;
+my $BTRFS_SNAPSHOT_REGEX = qr/((?:vm|base|subvol)-\d+-disk-\d+(?:\.subvol)?)(?:\@(\S+))$/;
 
-# Calls `$code->($volume, $name, $snapshot)` for each subvol in a directory matching our volume
-# regex.
-my sub foreach_subvol : prototype($$) {
-    my ($dir, $code) = @_;
+# Calls `$code->($snap_name)` for each snapshot of the BTRFS subvolume.
+my sub foreach_snapshot_of_subvol : prototype($$) {
+    my ($subvol, $code) = @_;
 
-    dir_glob_foreach($dir, $BTRFS_VOL_REGEX, sub {
-	my ($volume, $name, $snapshot) = ($1, $2, $3);
+    my $basename = basename($subvol);
+    my $dir = dirname($subvol);
+    dir_glob_foreach($dir, $BTRFS_SNAPSHOT_REGEX, sub {
+	my ($volume, $name, $snap_name) = ($1, $2, $3);
 	return if !path_is_subvolume("$dir/$volume");
-	$code->($volume, $name, $snapshot);
-    })
+	return if $name ne $basename;
+	$code->($snap_name);
+    });
 }
 
 sub free_image {
@@ -436,19 +438,16 @@ sub free_image {
 	$subvol = raw_file_to_subvol($path);
     }
 
-    my $dir = dirname($subvol);
-    my $basename = basename($subvol);
     my @snapshot_vols;
-    foreach_subvol($dir, sub {
-	my ($volume, $name, $snapshot) = @_;
-	return if $name ne $basename;
-	return if !defined $snapshot;
-	push @snapshot_vols, "$dir/$volume";
+    foreach_snapshot_of_subvol($subvol, sub {
+	my ($snap_name) = @_;
+	push @snapshot_vols, "$subvol\@$snap_name";
     });
 
     $class->btrfs_cmd(['subvolume', 'delete', '--', @snapshot_vols, $subvol]);
     # try to cleanup directory to not clutter storage with empty $vmid dirs if
     # all images from a guest got deleted
+    my $dir = dirname($subvol);
     rmdir($dir);
 
     return undef;
@@ -782,8 +781,10 @@ sub volume_export {
     if (ref($with_snapshots) eq 'ARRAY') {
 	push @$cmd, (map { "$path\@$_" } ($with_snapshots // [])->@*), $path;
     } else {
-	dir_glob_foreach(dirname($path), $BTRFS_VOL_REGEX, sub {
-	    push @$cmd, "$path\@$_[2]" if !(defined($snapshot) && $_[2] eq $snapshot);
+	foreach_snapshot_of_subvol($path, sub {
+	    my ($snap_name) = @_;
+	    # NOTE: if there is a $snapshot specified via the arguments, it is added last below.
+	    push @$cmd, "$path\@$snap_name" if !(defined($snapshot) && $snap_name eq $snapshot);
 	});
     }
     $path .= "\@$snapshot" if defined($snapshot);
@@ -857,7 +858,7 @@ sub volume_import {
 	$dh->rewind;
 	while (defined(my $entry = $dh->read)) {
 	    next if $entry eq '.' || $entry eq '..';
-	    next if $entry !~ /^$BTRFS_VOL_REGEX$/;
+	    next if $entry !~ /^$BTRFS_SNAPSHOT_REGEX$/;
 	    my ($cur_diskname, $cur_snapshot) = ($1, $2);
 
 	    die "send stream included a non-snapshot subvolume\n"
@@ -883,7 +884,7 @@ sub volume_import {
 	# Rotate the disk into place, first the current state:
 	# Note that read-only subvolumes cannot be moved into different directories, but for the
 	# "current" state we also want a writable copy, so start with that:
-	$class->btrfs_cmd(['property', 'set', "$tmppath/$diskname\@$snapshot", 'ro', 'false']);
+	$class->btrfs_cmd(['property', 'set', '-f', "$tmppath/$diskname\@$snapshot", 'ro', 'false']);
 	PVE::Tools::renameat2(
 	    -1,
 	    "$tmppath/$diskname\@$snapshot",
@@ -905,7 +906,7 @@ sub volume_import {
 
 	# Now go through the remaining snapshots (if any)
 	foreach my $snap (@snapshots) {
-	    $class->btrfs_cmd(['property', 'set', "$tmppath/$diskname\@$snap", 'ro', 'false']);
+	    $class->btrfs_cmd(['property', 'set', '-f', "$tmppath/$diskname\@$snap", 'ro', 'false']);
 	    PVE::Tools::renameat2(
 		-1,
 		"$tmppath/$diskname\@$snap",
