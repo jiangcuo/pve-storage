@@ -160,7 +160,7 @@ __PACKAGE__->register_method ({
 	my $authuser = $rpcenv->get_user();
 
 	my $dev =  PVE::Diskmanage::get_disk_name($param->{dev});
-	die "$dev has been a bcache dev !\n" if ( -d "/sys/block/$dev/bcache/");
+	die "$dev has been a bcache dev!\n" if ( -d "/sys/block/$dev/bcache/");
 	return PVE::SysFSTools::file_write("/sys/fs/bcache/register","/dev/$dev");
 	
     }});
@@ -364,7 +364,7 @@ __PACKAGE__->register_method ({
     name => 'stop_cache',
     path => 'stop_cache',
     method => 'POST',
-    description => "ceate cache device",
+    description => "stop cache device",
     permissions => {
 	description => "Show all users which have permission on that host."
 	},
@@ -389,12 +389,12 @@ __PACKAGE__->register_method ({
 	my $rpcenv = PVE::RPCEnvironment::get();
 
 	my $authuser = $rpcenv->get_user();
+
 	my $cachedev = PVE::Diskmanage::get_bcache_cache_dev($param->{cache});
 	PVE::Diskmanage::check_bcache_cache_is_inuse($cachedev);
-	$cachedev = PVE::Diskmanage::bcache_cache_uuid_to_dev($cachedev);
 	$cachedev =~ /^([a-zA-Z0-9_\-\.]+)$/ || die "Invalid cachedev format: $cachedev";
 	my $uuid = $1;
-	return PVE::SysFSTools::file_write("/sys/class/block/$uuid/bcache/set/stop","1");
+	return PVE::SysFSTools::file_write("/sys/fs/bcache/$uuid/stop","1");
     }});
 
 
@@ -461,9 +461,9 @@ __PACKAGE__->register_method ({
 	my $clear = $param->{'clear-stats'};
 
 	if (!$clear && !$wb_percent && !$sequential && !$cachemode){
-		die "Must set a param !\n";
+		die "Need a param eg. --clear-stats 1 --wb-percent 20 --sequential 8192 --cachemode writeback\n";
 	}
-	my $path = "/sys/block/bcache0/bcache";
+	my $path = "/sys/block/$backenddev/bcache";
 	sub write_to_file {
 		my ($file, $value) = @_;
 		eval {
@@ -472,9 +472,7 @@ __PACKAGE__->register_method ({
 			PVE::SysFSTools::file_write($file, $value) ;
 			my $new = file_read_firstline("$file");
 			my $name = basename($file);
-			print "--------\n";
 			print "$name: $old => $new \n";
-			print "--------\n";
 			}
 		};
 		warn $@ if $@;
@@ -483,11 +481,11 @@ __PACKAGE__->register_method ({
 
 	write_to_file("$path/writeback_percent", $wb_percent);
 	if ($sequential){
-		$sequential = PVE::Tools::convert_size($sequential, 'kb' => 'mb'). "M"; 
+		$sequential = PVE::Tools::convert_size($sequential, 'kb' => 'b'); 
 		write_to_file("$path/sequential_cutoff", $sequential);
 	}
 
-	PVE::SysFSTools::file_write("$path/clear_stats", $1) if $clear;
+	PVE::SysFSTools::file_write("$path/clear_stats", "1") if $clear;
 	return "ok\n";
     }});
 

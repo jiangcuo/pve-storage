@@ -937,18 +937,37 @@ sub scan_bcache_device {
     foreach my $device (keys %$res) {
         if ($res->{$device}{'fstype'} && $res->{$device}{'fstype'} eq 'bcache') {
             my $d = {}; 
-			my $name = basename($device);
-			
-			my $state = "Running";
-			my $disktype = "backend";
+			$device = basename($device);
+			my $path = get_bcache_dev_path($device);
+			my $state = "Stopped";
+			my $disktype = "unknown";
+			my $cachemode = "unknown";
+			my $backenddev = "unknown";
+			my $cache = "unknown";
 
-			if ( ! -d "/sys/block/$name/bcache/") {
-				$state = "Stopped";
-				$disktype = "unknown";
-			}
-			if ( -d "/sys/block/$name/bcache/set") {
+			if ( -d "/sys/block/$path/bcache/") {
+				$state = "Running";
+				$disktype = "backend";
+				#fix some bug
+				if ($device =~ m/^nvme/ ||
+				$device =~ m/^sd/ ||
+				$device =~ m/^xvd/ ||
+				$device =~ m/^mmcblk/ ||
+				$device =~ m/^nbd/) { 
+					if ( ! -d "/sys/block/$path/bcache/set") {
+						$device = basename(realpath("/sys/block/$path/bcache/dev")); 
+						$path = get_bcache_dev_path($device);
+					}
+				}
+            }
+
+			if ( -d "/sys/block/$path/bcache/set"){
 				$disktype = "cache";
+				$backenddev = "none";
+				$cachemode = "none";
+				$cache = "none";
 			}
+
 			if ($showtype ne 'all' && ($showtype ne $disktype)){
 				next;
 			}
@@ -958,34 +977,26 @@ sub scan_bcache_device {
 
 			#num3
 			$d->{state} = $state; 
-			my $cachemode = "unknown";
-			my $backenddev = "unknown";
-			my $cache = "unknown";
 			if ( $disktype eq 'backend' && ( $showtype eq 'all' || $showtype eq $disktype  )){
 				if ( $state ne 'Stopped'){
-					$d->{backing_dev} = file_read_firstline("/sys/block/$name/bcache/backing_dev_name");
-					$d->{backing_dev_uuid} = file_read_firstline("/sys/block/$name/bcache/backing_dev_uuid");
-					$d->{cache_status} = file_read_firstline("/sys/block/$name/state");
-					$cachemode = file_read_firstline("/sys/block/$name/bcache/cache_mode");
+					$backenddev = file_read_firstline("/sys/block/$path/bcache/backing_dev_name");
+					$cachemode = file_read_firstline("/sys/block/$path/bcache/cache_mode");
 					if ( $cachemode && $cachemode =~ /\[(.*?)\]/) {
 						$cachemode = $1; 
 					}
-					my $path = realpath("/sys/block/$name/bcache/dev");
-					$backenddev = $name;
-					$name = basename($path);
-					if ( -d "/sys/block/$name/bcache/cache"){
-						$cache = basename(realpath("/sys/block/$name/bcache/cache/cache0/../"));
+					if ( -d "/sys/block/$path/bcache/cache"){
+						$cache = basename(realpath("/sys/block/$path/bcache/cache/cache0/../"));
 					}
 				}else{
-					$backenddev = $name;
+					$backenddev = $device;
 				}
 			}
-            $d->{name} = $name;
+            $d->{name} = $device;
 			$d->{'backend-dev'} = $backenddev;
 			$d->{cachemode} = $cachemode;
 			$d->{'cache-dev'} = $cache;
 
-            my $size = int(file_read_firstline("/sys/block/$name/size")) * 512;
+            my $size = int(file_read_firstline("/sys/block/$path/size")) * 512;
             $size = PVE::Tools::convert_size($size, 'b' => 'GB');
 			$d->{size} = $size . "GB"; 
 
@@ -1013,18 +1024,34 @@ sub get_devices_by_uuid {
     return $res;
 }
 
+sub get_bcache_dev_path {
+	my ($dev) = @_;
+	my $diskname = $dev;
+	if ($dev =~ m/^(nvme\d+n\d+)p\d+$/ || # nvme分区，如nvme0n1p1
+                $dev =~ m/^([sv]d[a-z]+)\d+$/ ||  # sda1, vdb2等标准分区
+                $dev =~ m/^(xvd[a-z]+)\d+$/ ||    # xen虚拟分区
+                $dev =~ m/^(mmcblk\d+)p\d+$/ ||   # mmcblk分区
+                $dev =~ m/^(nbd\d+)p\d+$/) {      # nbd网络块设备分区
+				$diskname = $1;
+				$dev = "$diskname/$dev";
+            }
+	return $dev;
+}
 
 sub get_bcache_cache_dev {
 	my ($cachedev) = @_;
+	my $path = $cachedev;
 	if ($cachedev =~ m{^/dev/}) {
 		$cachedev = basename($cachedev);
-		die "$cachedev is not a bcache dev!\n" if (! -d "/sys/block/$cachedev/bcache/set");
-		$cachedev = basename(realpath("/sys/block/$cachedev/bcache/set"));
+		$path = get_bcache_dev_path($cachedev);
+		die "$cachedev is not a bcache dev!\n" if (! -d "/sys/block/$path/bcache/set");
+		$cachedev = basename(realpath("/sys/block/$path/bcache/set"));
 	} elsif (is_uuid($cachedev)){
 		die "uuid $cachedev not a cache dev!\n" if (! -d "/sys/fs/bcache/$cachedev/");
 	} else  {
-		die "cache $cachedev dev is not a cache device!\n" if ! -d "/sys/block/$cachedev/bcache/set";
-		$cachedev = basename(realpath("/sys/block/$cachedev/bcache/set"));
+		$path = get_bcache_dev_path($cachedev);
+		die "cache $cachedev dev is not a cache device!\n" if ! -d "/sys/block/$path/bcache/set";
+		$cachedev = basename(realpath("/sys/block/$path/bcache/set"));
 	}
 	return $cachedev;
 }
@@ -1034,7 +1061,8 @@ sub check_bcache_cache_dev {
 	if (is_uuid($cachedev)){
 		return 0 if (! -d "/sys/fs/bcache/$cachedev/");
 	}else{
-		return 0 if (! -d "/sys/block/$cachedev/bcache/set");
+		my $path = get_bcache_dev_path($cachedev);
+		return 0 if (! -d "/sys/block/$path/bcache/set");
 	}
 	return 1;
 }
@@ -1050,7 +1078,8 @@ sub get_bcache_backend_dev {
 	if ($backenddev =~ m{^/dev/}) {
 		$backenddev = basename($backenddev);
 	}
-	die "backend $backenddev dev is not a bcache device!\n"  if ! -d "/sys/block/$backenddev/bcache/"; 
+	my $path = get_bcache_dev_path($backenddev);
+	die "backend $backenddev dev is not a bcache device!\n"  if ! -d "/sys/block/$path/bcache/"; 
 	return $backenddev;
 }
 
@@ -1069,21 +1098,11 @@ sub get_disk_name {
 	return $dev;
 }
 
-sub get_bcache_cache_name {
-	my ($dev) = @_;
-	if ($dev =~ m{^/dev/}) {
-		$dev = basename($dev);
-	} elsif (is_uuid($dev)) {
-		die "$dev is not a bcache,can't use uuid format!\n" if (! -d "/sys/fs/bcache/$dev/");
-		$dev = bcache_cache_uuid_to_dev($dev);
-	}
-	die "$dev is not a blockdev!\n" if !PVE::Diskmanage::verify_blockdev_path("/dev/$dev");
-	return $dev;
-}
 
 sub bcache_cache_uuid_to_dev {
 	my ($dev) = @_;
-	return basename(realpath("/sys/fs/bcache/$dev/cache0/../"));
+	my $path = get_bcache_dev_path($dev);
+	return basename(realpath("/sys/block/$path/bcache/cache0/../"));
 }
 
 
