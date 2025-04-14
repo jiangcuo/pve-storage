@@ -184,11 +184,10 @@ my $defaultData = {
 	    type => 'string', format => 'pve-storage-path',
 	    optional => 1,
 	},
-	'format' => {
+	format => get_standard_option('pve-storage-image-format', {
 	    description => "Default image format.",
-	    type => 'string', format => 'pve-storage-format',
 	    optional => 1,
-	},
+	}),
 	preallocation => {
 	    description => "Preallocation mode for raw and qcow2 images. " .
 		"Using 'metadata' on raw images results in preallocation=off.",
@@ -244,6 +243,28 @@ sub dirs_hash_to_string {
     my $hash = shift;
 
     return join(',', map { "$_=$hash->{$_}" } sort keys %$hash);
+}
+
+sub sensitive_properties {
+    my ($type) = @_;
+
+    my $data = $defaultData->{plugindata}->{$type};
+    if (my $sensitive_properties = $data->{'sensitive-properties'}) {
+	return [sort keys $sensitive_properties->%*];
+    }
+
+    # For backwards compatibility. This list was hardcoded in the API module previously.
+    return [qw(encryption-key keyring master-pubkey password)];
+}
+
+sub storage_has_feature {
+    my ($type, $feature) = @_;
+
+    my $data = $defaultData->{plugindata}->{$type};
+    if (my $features = $data->{features}) {
+	return $features->{$feature};
+    }
+    return;
 }
 
 sub default_format {
@@ -342,11 +363,15 @@ sub verify_content {
     return $ct;
 }
 
+# NOTE the 'pve-storage-format' is deprecated, use the 'pve-storage-image-format' standard option
+# from Storage/Common.pm instead
+# TODO PVE 9 - remove after doing a versioned breaks for pve-guest-common, which was using this
+# format.
 PVE::JSONSchema::register_format('pve-storage-format', \&verify_format);
 sub verify_format {
     my ($fmt, $noerr) = @_;
 
-    if ($fmt !~ m/(raw|qcow2|vmdk|subvol)/) {
+    if ($fmt !~ m/^(raw|qcow2|vmdk|subvol)$/) {
 	return undef if $noerr;
 	die "invalid format '$fmt'\n";
     }
@@ -953,7 +978,7 @@ sub free_image {
 }
 
 # TODO taken from PVE/QemuServer/Drive.pm, avoiding duplication would be nice
-my @checked_qemu_img_formats = qw(raw cow qcow qcow2 qed vmdk cloop);
+my @checked_qemu_img_formats = qw(raw qcow qcow2 qed vmdk cloop);
 
 # set $untrusted if the file in question might be malicious since it isn't
 # created by our stack
@@ -1007,7 +1032,7 @@ sub file_size_info {
     if (S_ISDIR($st->mode)) {
 	$handle_error->("expected format '$file_format', but '$filename' is a directory\n")
 	    if $file_format && $file_format ne 'subvol';
-	return wantarray ? (0, 'subvol', 0, undef, $st->ctime) : 1;
+	return wantarray ? (0, 'subvol', 0, undef, $st->ctime) : 0;
     } elsif ($file_format && $file_format eq 'subvol') {
 	$handle_error->("expected format '$file_format', but '$filename' is not a directory\n");
     }
@@ -1733,10 +1758,7 @@ sub volume_export {
 sub volume_export_formats {
     my ($class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots) = @_;
     if ($scfg->{path} && !defined($snapshot) && !defined($base_snapshot)) {
-	my ($file) = $class->path($scfg, $volname, $storeid)
-	    or return;
 	my $format = ($class->parse_volname($volname))[6];
-	my $size = file_size_info($file, undef, $format);
 
 	if ($with_snapshots) {
 	    return ($format.'+size') if ($format eq 'qcow2' || $format eq 'vmdk');
@@ -1856,6 +1878,21 @@ sub rename_volume {
 	die "rename '$old_path' to '$new_path' failed - $!\n";
 
     return "${storeid}:${base}${target_vmid}/${target_volname}";
+}
+
+# Used by storage plugins for external backup providers. See PVE::BackupProvider::Plugin for the API
+# the provider needs to implement.
+#
+# $scfg - the storage configuration
+# $storeid - the storage ID
+# $log_function($log_level, $message) - this log function can be used to write to the backup task
+#   log in Proxmox VE. $log_level is 'info', 'warn' or 'err', $message is the message to be printed.
+#
+# Returns a blessed reference to the backup provider class.
+sub new_backup_provider {
+    my ($class, $scfg, $storeid, $log_function) = @_;
+
+    die "implement me if enabling the feature 'backup-provider' in plugindata()->{features}\n";
 }
 
 sub config_aware_base_mkdir {

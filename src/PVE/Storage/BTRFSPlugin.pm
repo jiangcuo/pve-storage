@@ -45,6 +45,7 @@ sub plugindata {
 	    { images => 1, rootdir => 1 },
 	],
 	format => [ { raw => 1, subvol => 1 }, 'raw', ],
+	'sensitive-properties' => {},
     };
 }
 
@@ -232,14 +233,15 @@ sub btrfs_cmd {
     return $msg;
 }
 
-sub btrfs_get_subvol_id {
-    my ($class, $path) = @_;
-    my $info = $class->btrfs_cmd(['subvolume', 'show', '--', $path]);
-    if ($info !~ /^\s*(?:Object|Subvolume) ID:\s*(\d+)$/m) {
-	die "failed to get btrfs subvolume ID from: $info\n";
-    }
-    return $1;
-}
+# NOTE: this function is currently boken, because btrfs_cmd uses '-q' so there will be no output.
+#sub btrfs_get_subvol_id {
+#    my ($class, $path) = @_;
+#    my $info = $class->btrfs_cmd(['subvolume', 'show', '--', $path]);
+#    if ($info !~ /^\s*(?:Object|Subvolume) ID:\s*(\d+)$/m) {
+#	die "failed to get btrfs subvolume ID from: $info\n";
+#    }
+#    return $1;
+#}
 
 my sub chattr : prototype($$$) {
     my ($fh, $mask, $xor) = @_;
@@ -486,7 +488,7 @@ sub volume_size_info {
 	my $ctime = (stat($path))[10];
 	my ($used, $size) = (0, 0);
 	#my ($used, $size) = btrfs_subvol_quota($class, $path); # uses wantarray
-	return wantarray ? ($size, 'subvol', $used, undef, $ctime) : 1;
+	return wantarray ? ($size, 'subvol', $used, undef, $ctime) : $size;
     }
 
     return PVE::Storage::Plugin::file_size_info($path, $timeout, $format);
@@ -497,10 +499,13 @@ sub volume_resize {
 
     my $format = ($class->parse_volname($volname))[6];
     if ($format eq 'subvol') {
-	my $path = $class->filesystem_path($scfg, $volname);
-	my $id = '0/' . $class->btrfs_get_subvol_id($path);
-	$class->btrfs_cmd(['qgroup', 'limit', '--', "${size}k", "0/$id", $path]);
-	return undef;
+	# NOTE: `btrfs send/recv` actually drops quota information so supporting subvolumes with
+	# quotas doesn't play nice with send/recv.
+	die "cannot resize subvolume - btrfs quotas are currently not supported\n";
+	# my $path = $class->filesystem_path($scfg, $volname);
+	# my $id = '0/' . $class->btrfs_get_subvol_id($path);
+	# $class->btrfs_cmd(['qgroup', 'limit', '--', "${size}k", "0/$id", $path]);
+	# return undef;
     }
 
     return PVE::Storage::Plugin::volume_resize(@_);
@@ -779,7 +784,8 @@ sub volume_export {
     }
     push @$cmd, '--';
     if (ref($with_snapshots) eq 'ARRAY') {
-	push @$cmd, (map { "$path\@$_" } ($with_snapshots // [])->@*), $path;
+	push @$cmd, (map { "$path\@$_" } ($with_snapshots // [])->@*);
+	push @$cmd, $path if !defined($base_snapshot);
     } else {
 	foreach_snapshot_of_subvol($path, sub {
 	    my ($snap_name) = @_;
@@ -823,6 +829,7 @@ sub volume_import {
 
     if (defined($base_snapshot)) {
 	my $path = $class->path($scfg, $volname, $storeid, $base_snapshot);
+	$path = raw_file_to_subvol($path) if $volume_format eq 'raw';
 	die "base snapshot '$base_snapshot' not found - no such directory '$path'\n"
 	    if !path_is_subvolume($path);
     }

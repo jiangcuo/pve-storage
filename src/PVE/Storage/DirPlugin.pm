@@ -6,6 +6,7 @@ use warnings;
 use Cwd;
 use Encode qw(decode encode);
 use File::Path;
+use File::Spec;
 use IO::File;
 use POSIX;
 
@@ -26,6 +27,7 @@ sub plugindata {
 	content => [ { images => 1, rootdir => 1, vztmpl => 1, iso => 1, backup => 1, snippets => 1, none => 1, import => 1 },
 		     { images => 1,  rootdir => 1 }],
 	format => [ { raw => 1, qcow2 => 1, vmdk => 1, subvol => 1 } , 'raw' ],
+	'sensitive-properties' => {},
     };
 }
 
@@ -245,6 +247,8 @@ sub check_config {
     if ($opts->{path} !~ m|^/[-/a-zA-Z0-9_.@]+$|) {
 	die "illegal path for directory storage: $opts->{path}\n";
     }
+    # remove trailing slashes from path
+    $opts->{path} = File::Spec->canonpath($opts->{path});
     return $opts;
 }
 

@@ -387,7 +387,7 @@ __PACKAGE__->register_method ({
     name => 'upload',
     path => '{storage}/upload',
     method => 'POST',
-    description => "Upload templates, ISO images and OVAs.",
+    description => "Upload templates, ISO images, OVAs and VM images.",
     permissions => {
 	check => ['perm', '/storage/{storage}', ['Datastore.AllocateTemplate']],
     },
@@ -455,7 +455,8 @@ __PACKAGE__->register_method ({
 	my $filename = PVE::Storage::normalize_content_filename($param->{filename});
 
 	my $path;
-	my $isOva = 0;
+	my $is_ova = 0;
+	my $image_format;
 
 	if ($content eq 'iso') {
 	    if ($filename !~ m![^/]+$PVE::Storage::ISO_EXT_RE_0$!) {
@@ -471,8 +472,14 @@ __PACKAGE__->register_method ({
 	    if ($filename !~ m!${PVE::Storage::SAFE_CHAR_CLASS_RE}+$PVE::Storage::UPLOAD_IMPORT_EXT_RE_1$!) {
 		raise_param_exc({ filename => "invalid filename or wrong extension" });
 	    }
+	    my $format = $1;
 
-	    $isOva = 1;
+	    if ($format eq 'ova') {
+		$is_ova = 1;
+	    } else {
+		$image_format = $format;
+	    }
+
 	    $path = PVE::Storage::get_import_dir($cfg, $storage);
 	} else {
 	    raise_param_exc({ content => "upload content type '$content' not allowed" });
@@ -541,8 +548,11 @@ __PACKAGE__->register_method ({
 		    PVE::Storage::assert_iso_content($tmpfilename);
 		}
 
-		if ($isOva) {
+		if ($is_ova) {
 		    assert_ova_contents($tmpfilename);
+		} elsif (defined($image_format)) {
+		    # checks untrusted image
+		    PVE::Storage::file_size_info($tmpfilename, 10, $image_format, 1);
 		}
 	    };
 	    if (my $err = $@) {
@@ -578,7 +588,7 @@ __PACKAGE__->register_method({
     name => 'download_url',
     path => '{storage}/download-url',
     method => 'POST',
-    description => "Download templates, ISO images and OVAs by using an URL.",
+    description => "Download templates, ISO images, OVAs and VM images by using an URL.",
     proxyto => 'node',
     permissions => {
 	description => 'Requires allocation access on the storage and as this allows one to probe'
@@ -666,7 +676,8 @@ __PACKAGE__->register_method({
 	my $filename = PVE::Storage::normalize_content_filename($param->{filename});
 
 	my $path;
-	my $isOva = 0;
+	my $is_ova = 0;
+	my $image_format;
 
 	if ($content eq 'iso') {
 	    if ($filename !~ m![^/]+$PVE::Storage::ISO_EXT_RE_0$!) {
@@ -682,9 +693,12 @@ __PACKAGE__->register_method({
 	    if ($filename !~ m!${PVE::Storage::SAFE_CHAR_CLASS_RE}+$PVE::Storage::UPLOAD_IMPORT_EXT_RE_1$!) {
 		raise_param_exc({ filename => "invalid filename or wrong extension" });
 	    }
+	    my $format = $1;
 
-	    if ($filename =~ m/\.ova$/) {
-		$isOva = 1;
+	    if ($format eq 'ova') {
+		$is_ova = 1;
+	    } else {
+		$image_format = $format;
 	    }
 
 	    $path = PVE::Storage::get_import_dir($cfg, $storage);
@@ -700,6 +714,7 @@ __PACKAGE__->register_method({
 	    hash_required => 0,
 	    verify_certificates => $param->{'verify-certificates'} // 1,
 	    http_proxy => $dccfg->{http_proxy},
+	    https_proxy => $dccfg->{http_proxy},
 	};
 
 	my ($checksum, $checksum_algorithm) = $param->@{'checksum', 'checksum-algorithm'};
@@ -715,8 +730,11 @@ __PACKAGE__->register_method({
 		PVE::Storage::assert_iso_content($tmp_path);
 	    }
 
-	    if ($isOva) {
+	    if ($is_ova) {
 		assert_ova_contents($tmp_path);
+	    } elsif (defined($image_format)) {
+		# checks untrusted image
+		PVE::Storage::file_size_info($tmp_path, 10, $image_format, 1);
 	    }
 	};
 

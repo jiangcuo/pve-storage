@@ -42,11 +42,11 @@ use PVE::Storage::BTRFSPlugin;
 use PVE::Storage::ESXiPlugin;
 
 # Storage API version. Increment it on changes in storage API interface.
-use constant APIVER => 10;
+use constant APIVER => 11;
 # Age is the number of versions we're backward compatible with.
 # This is like having 'current=APIVER' and age='APIAGE' in libtool,
 # see https://www.gnu.org/software/libtool/manual/html_node/Libtool-versioning.html
-use constant APIAGE => 1;
+use constant APIAGE => 2;
 
 our $KNOWN_EXPORT_FORMATS = ['raw+size', 'tar+size', 'qcow2+size', 'vmdk+size', 'zfs', 'btrfs'];
 
@@ -116,7 +116,7 @@ our $BACKUP_EXT_RE_2 = qr/\.(tgz|(?:tar|vma)(?:\.(${\PVE::Storage::Plugin::COMPR
 
 our $IMPORT_EXT_RE_1 = qr/\.(ova|ovf|qcow2|raw|vmdk)/;
 
-our $UPLOAD_IMPORT_EXT_RE_1 = qr/\.(ova)/;
+our $UPLOAD_IMPORT_EXT_RE_1 = qr/\.(ova|qcow2|raw|vmdk)/;
 
 our $SAFE_CHAR_CLASS_RE = qr/[a-zA-Z0-9\-\.\+\=\_]/;
 our $SAFE_CHAR_WITH_WHITESPACE_CLASS_RE = qr/[ a-zA-Z0-9\-\.\+\=\_]/;
@@ -211,6 +211,14 @@ sub storage_check_enabled {
     }
 
     return storage_check_node($cfg, $storeid, $node, $noerr);
+}
+
+sub storage_has_feature {
+    my ($cfg, $storeid, $feature) = @_;
+
+    my $scfg = storage_config($cfg, $storeid);
+
+    return PVE::Storage::Plugin::storage_has_feature($scfg->{type}, $feature);
 }
 
 # storage_can_replicate:
@@ -1479,7 +1487,7 @@ sub scan_iscsi {
 	die "unable to parse/resolve portal address '${portal_in}'\n";
     }
 
-    return PVE::Storage::ISCSIPlugin::iscsi_discovery([ $portal ]);
+    return PVE::Storage::ISCSIPlugin::iscsi_discovery(undef, [ $portal ]);
 }
 
 sub storage_default_format {
@@ -1751,6 +1759,17 @@ sub extract_vzdump_config {
 	    storage_check_enabled($cfg, $storeid);
 	    return PVE::Storage::PBSPlugin->extract_vzdump_config($scfg, $volname, $storeid);
 	}
+
+	if (storage_has_feature($cfg, $storeid, 'backup-provider')) {
+	    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+	    my $log_function = sub {
+		my ($log_level, $message) = @_;
+		my $prefix = $log_level eq 'err' ? 'ERROR' : uc($log_level);
+		print "$prefix: $message\n";
+	    };
+	    my $backup_provider = $plugin->new_backup_provider($scfg, $storeid, $log_function);
+	    return $backup_provider->archive_get_guest_config($volname, $storeid);
+	}
     }
 
     my $archive = abs_filesystem_path($cfg, $volid);
@@ -2017,6 +2036,14 @@ sub volume_export_start {
     my $cmds = $volume_export_prepare->($cfg, $volid, $format, $log, $opts);
 
     PVE::Tools::run_command($cmds, %$run_command_params);
+}
+
+sub new_backup_provider {
+    my ($cfg, $storeid, $log_function) = @_;
+
+    my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+    return $plugin->new_backup_provider($scfg, $storeid, $log_function);
 }
 
 # bash completion helper
