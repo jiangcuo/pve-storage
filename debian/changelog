@@ -1,3 +1,9 @@
+libpve-storage-perl (8.3.6-1) bookworm; urgency=medium
+
+  * pvebcache: fix issue
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Mon, 14 Apr 2025 18:58:32 +0800
+
 libpve-storage-perl (8.3.6) bookworm; urgency=medium
 
   * plugin: file size info: be consistent about size of directory subvol to
