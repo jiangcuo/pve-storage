@@ -1,3 +1,40 @@
+libpve-storage-perl (8.3.6) bookworm; urgency=medium
+
+  * plugin: file size info: be consistent about size of directory subvol to
+    avoid breakage at use sites, like storage migration with btrfs.
+
+  * plugin: volume export formats: avoid superfluous file_size_info() call.
+
+  * api: volume info: do not fail for zero-sized subvolumes.
+
+  * btrfs: die early for broken subvolume resize.
+
+  * import: allow upload of guest images files into import storage.
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 07 Apr 2025 22:18:14 +0200
+
+libpve-storage-perl (8.3.5) bookworm; urgency=medium
+
+  * fix #3716: api: download from url: use proxy option for https, not just
+    http.
+
+  * extend the storage plugin interface providing:
+    + helper to query features that plugins can declare to support
+    + add new_backup_provider plugin method to allow creating a storage that
+      implements backup functionality that natively integrates into PVE.
+    + declare which properties are sensitive or not centrally in a plugin.
+
+  * disk management: allow leading white space in the serial number property.
+
+  * btrs: various small fixes in preparation for fully supported volume
+    export.
+
+  * fix #3986: directory plugin: remove trailing slashes to avoid multiple
+    consecutive slashes; while they do not have any effect they rather look
+    odd and users might misinterpret them as causing problems.
+
+ -- Proxmox Support Team <support@proxmox.com>  Sun, 06 Apr 2025 21:18:38 +0200
+
 libpve-storage-perl (8.3.4-3) bookworm; urgency=medium
 
   * fix bcache syntax error
@@ -14,15 +51,38 @@ libpve-storage-perl (8.3.4-1) bookworm; urgency=medium
 
   * fix bcache missing.
 
- -- Lierfang Support Team <itsupport@lierfang.com>  Wed, 26 Feb 2025 17:23:42 +0800
-
-libpve-storage-perl (8.3.4) bookworm; urgency=medium
-
   * cli: add pvebcache.
 
   * copyright: add lierfang information.
 
- -- Lierfang Support Team <itsupport@lierfang.com>  Wed, 26 Feb 2025 17:13:39 +0800
+ -- Lierfang Support Team <itsupport@lierfang.com>  Wed, 26 Feb 2025 17:23:42 +0800
+
+libpve-storage-perl (8.3.4) bookworm; urgency=medium
+
+  * rbd plugin: drop broken cache for pool specific information in list image.
+
+  * iSCSI direct: drop broken cache for storeid-specific information in list
+    image.
+
+  * fix #3873: btrfs: volume export: avoid that snapshots of other disks get
+    picked up to fix storage migration with multiple volumes and snapshots.
+
+  * btrfs: volume import: forcefully set image to readwrite to be able to
+    recreate snapshots.
+
+  * fix #957: iscsi: improve check for already available sessions to a portal,
+    reducing log-noise on the iSCSI server.
+
+  * plugin: file size info: remove ancient 'cow' from formats, dropped
+    upstream in QEMU version 2.2.
+
+  * api: alloc: allow explicitly passing 'vmdk' for the 'format' option
+    instead of just detecting that format indirectly.
+
+  * introduce 'pve-storage-image-format' standard option for image schema
+    format
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 03 Apr 2025 19:20:17 +0200
 
 libpve-storage-perl (8.3.3+port1) bookworm; urgency=medium
 

@@ -2,11 +2,11 @@ package PVE::API2::Storage::Content;
 
 use strict;
 use warnings;
-use Data::Dumper;
 
 use PVE::SafeSyslog;
 use PVE::Cluster;
 use PVE::Storage;
+use PVE::Storage::Common; # for 'pve-storage-image-format' standard option
 use PVE::INotify;
 use PVE::Exception qw(raise_param_exc);
 use PVE::RPCEnvironment;
@@ -178,12 +178,10 @@ __PACKAGE__->register_method ({
 		type => 'string',
 		pattern => '\d+[MG]?',
 	    },
-	    'format' => {
-		type => 'string',
-		enum => ['raw', 'qcow2', 'subvol'],
+	    format => get_standard_option('pve-storage-image-format', {
 		requires => 'size',
 		optional => 1,
-	    },
+	    }),
 	},
     },
     returns => {
@@ -324,7 +322,9 @@ __PACKAGE__->register_method ({
 
 	my $path = PVE::Storage::path($cfg, $volid);
 	my ($size, $format, $used, $parent) =  PVE::Storage::volume_size_info($cfg, $volid);
-	die "volume_size_info on '$volid' failed\n" if !($format && $size);
+	die "volume_size_info on '$volid' failed - no format\n" if !$format;
+	die "volume_size_info on '$volid' failed - no size\n" if !defined($size);
+	die "volume '$volid' has size zero\n" if !$size && $format ne 'subvol';
 
 	my $entry = {
 	    path => $path,
