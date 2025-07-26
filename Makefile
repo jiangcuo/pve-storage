@@ -1,4 +1,5 @@
 include /usr/share/dpkg/pkg-info.mk
+include /usr/share/dpkg/architecture.mk
 
 PACKAGE=libpve-storage-perl
 BUILDDIR ?= $(PACKAGE)-$(DEB_VERSION)
@@ -6,7 +7,7 @@ DSC=$(PACKAGE)_$(DEB_VERSION).dsc
 
 GITVERSION:=$(shell git rev-parse HEAD)
 
-DEB=$(PACKAGE)_$(DEB_VERSION_UPSTREAM_REVISION)_all.deb
+DEB=$(PACKAGE)_$(DEB_VERSION_UPSTREAM_REVISION)_$(DEB_HOST_ARCH).deb
 
 all:
 
