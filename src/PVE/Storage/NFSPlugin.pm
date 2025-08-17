@@ -93,7 +93,6 @@ sub options {
         export => { fixed => 1 },
         nodes => { optional => 1 },
         disable => { optional => 1 },
-        maxfiles => { optional => 1 },
         'prune-backups' => { optional => 1 },
         'max-protected-backups' => { optional => 1 },
         options => { optional => 1 },
@@ -240,6 +239,10 @@ sub update_volume_attribute {
 
 sub get_import_metadata {
     return PVE::Storage::DirPlugin::get_import_metadata(@_);
+}
+
+sub volume_qemu_snapshot_method {
+    return PVE::Storage::DirPlugin::volume_qemu_snapshot_method(@_);
 }
 
 1;

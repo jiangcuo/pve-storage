@@ -249,27 +249,6 @@ sub lock_storage_config {
     }
 }
 
-# FIXME remove maxfiles for PVE 8.0 or PVE 9.0
-my $convert_maxfiles_to_prune_backups = sub {
-    my ($scfg) = @_;
-
-    return if !$scfg;
-
-    my $maxfiles = delete $scfg->{maxfiles};
-
-    if (!defined($scfg->{'prune-backups'}) && defined($maxfiles)) {
-        my $prune_backups;
-        if ($maxfiles) {
-            $prune_backups = { 'keep-last' => $maxfiles };
-        } else { # maxfiles 0 means no limit
-            $prune_backups = { 'keep-all' => 1 };
-        }
-        $scfg->{'prune-backups'} = PVE::JSONSchema::print_property_string(
-            $prune_backups, 'prune-backups',
-        );
-    }
-};
-
 sub storage_config {
     my ($cfg, $storeid, $noerr) = @_;
 
@@ -278,8 +257,6 @@ sub storage_config {
     my $scfg = $cfg->{ids}->{$storeid};
 
     die "storage '$storeid' does not exist\n" if (!$noerr && !$scfg);
-
-    $convert_maxfiles_to_prune_backups->($scfg);
 
     return $scfg;
 }
@@ -740,11 +717,10 @@ sub path_to_volume_id {
         my $isodir = $plugin->get_subdir($scfg, 'iso');
         my $tmpldir = $plugin->get_subdir($scfg, 'vztmpl');
         my $backupdir = $plugin->get_subdir($scfg, 'backup');
-        my $privatedir = $plugin->get_subdir($scfg, 'rootdir');
         my $snippetsdir = $plugin->get_subdir($scfg, 'snippets');
         my $importdir = $plugin->get_subdir($scfg, 'import');
 
-        if ($path =~ m!^$imagedir/(\d+)/([^/\s]+)$!) {
+        if ($path =~ m!^\Q$imagedir\E/(\d+)/([^/\s]+)$!) {
             my $vmid = $1;
             my $name = $2;
 
@@ -756,22 +732,19 @@ sub path_to_volume_id {
                     return ('images', $info->{volid});
                 }
             }
-        } elsif ($path =~ m!^$isodir/([^/]+$ISO_EXT_RE_0)$!) {
+        } elsif ($path =~ m!^\Q$isodir\E/([^/]+$ISO_EXT_RE_0)$!) {
             my $name = $1;
             return ('iso', "$sid:iso/$name");
-        } elsif ($path =~ m!^$tmpldir/([^/]+$VZTMPL_EXT_RE_1)$!) {
+        } elsif ($path =~ m!^\Q$tmpldir\E/([^/]+$VZTMPL_EXT_RE_1)$!) {
             my $name = $1;
             return ('vztmpl', "$sid:vztmpl/$name");
-        } elsif ($path =~ m!^$privatedir/(\d+)$!) {
-            my $vmid = $1;
-            return ('rootdir', "$sid:rootdir/$vmid");
-        } elsif ($path =~ m!^$backupdir/([^/]+$BACKUP_EXT_RE_2)$!) {
+        } elsif ($path =~ m!^\Q$backupdir\E/([^/]+$BACKUP_EXT_RE_2)$!) {
             my $name = $1;
             return ('backup', "$sid:backup/$name");
-        } elsif ($path =~ m!^$snippetsdir/([^/]+)$!) {
+        } elsif ($path =~ m!^\Q$snippetsdir\E/([^/]+)$!) {
             my $name = $1;
             return ('snippets', "$sid:snippets/$name");
-        } elsif ($path =~ m!^$importdir/(${SAFE_CHAR_CLASS_RE}+${IMPORT_EXT_RE_1})$!) {
+        } elsif ($path =~ m!^\Q$importdir\E/(${SAFE_CHAR_CLASS_RE}+${IMPORT_EXT_RE_1})$!) {
             my $name = $1;
             return ('import', "$sid:import/$name");
         }
@@ -1474,7 +1447,7 @@ sub deactivate_volumes {
         }
     }
 
-    die "volume deactivation failed: " . join(' ', @errlist)
+    die "volume deactivation failed: " . join(' ', @errlist) . "\n"
         if scalar(@errlist);
 }
 

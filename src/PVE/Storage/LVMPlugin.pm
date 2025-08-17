@@ -470,9 +470,11 @@ my sub get_snap_name {
 }
 
 my sub parse_snap_name {
-    my ($name) = @_;
+    my ($name, $short_volname) = @_;
 
-    if ($name =~ m/^snap_\S+_(.*)\.qcow2$/) {
+    $short_volname =~ s/\.(qcow2)$//;
+
+    if ($name =~ m/^snap_\Q$short_volname\E_(.*)\.qcow2$/) {
         return $1;
     }
 }
@@ -799,11 +801,13 @@ sub status {
 sub volume_snapshot_info {
     my ($class, $scfg, $storeid, $volname) = @_;
 
+    my $short_volname = ($class->parse_volname($volname))[1];
+
     my $get_snapname_from_path = sub {
-        my ($volname, $path) = @_;
+        my ($path) = @_;
 
         my $name = basename($path);
-        if (my $snapname = parse_snap_name($name)) {
+        if (my $snapname = parse_snap_name($name, $short_volname)) {
             return $snapname;
         } elsif ($name eq $volname) {
             return 'current';
@@ -812,8 +816,6 @@ sub volume_snapshot_info {
     };
 
     my $path = $class->filesystem_path($scfg, $volname);
-    my ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format) =
-        $class->parse_volname($volname);
 
     my $json = PVE::Storage::Common::qemu_img_info($path, undef, 10, 1);
     die "failed to query file information with qemu-img\n" if !$json;
@@ -829,7 +831,8 @@ sub volume_snapshot_info {
     my $snapshots = $json_decode;
     for my $snap (@$snapshots) {
         my $snapfile = $snap->{filename};
-        my $snapname = $get_snapname_from_path->($volname, $snapfile);
+        ($snapfile) = $snapfile =~ m|^(/.*)|; # untaint
+        my $snapname = $get_snapname_from_path->($snapfile);
         #not a proxmox snapshot
         next if !$snapname;
 
@@ -842,7 +845,7 @@ sub volume_snapshot_info {
 
         my $parentfile = $snap->{'backing-filename'};
         if ($parentfile) {
-            my $parentname = $get_snapname_from_path->($volname, $parentfile);
+            my $parentname = $get_snapname_from_path->($parentfile);
             $info->{$snapname}->{parent} = $parentname;
             $info->{$parentname}->{child} = $snapname;
         }
@@ -989,7 +992,7 @@ sub volume_snapshot {
 
     #rename current volume to snap volume
     eval { $class->rename_snapshot($scfg, $storeid, $volname, 'current', $snap) };
-    die "error rename $volname to $snap\n" if $@;
+    die "error rename $volname to $snap - $@\n" if $@;
 
     eval { alloc_snap_image($class, $storeid, $scfg, $volname, $snap) };
     if ($@) {
@@ -1117,21 +1120,21 @@ sub volume_snapshot_delete {
 
     } else {
         #we rebase the child image on the parent as new backing image
-        my $parentpath = $snapshots->{$parentsnap}->{file};
         print
             "$volname: deleting snapshot '$snap' by rebasing '$childsnap' on top of '$parentsnap'\n";
-        print "running 'qemu-img rebase -b $parentpath -F qcow -f qcow2 $childpath'\n";
+        my $rel_parent_path = get_snap_name($class, $volname, $parentsnap);
         $cmd = [
             '/usr/bin/qemu-img',
             'rebase',
             '-b',
-            $parentpath,
+            $rel_parent_path,
             '-F',
             'qcow2',
             '-f',
             'qcow2',
             $childpath,
         ];
+        print "running '" . join(' ', $cmd->@*) . "'\n";
         eval { run_command($cmd) };
         if ($@) {
             #in case of abort, the state of the snap is still clean, just a little bit bigger

@@ -68,7 +68,6 @@ sub options {
         nodes => { optional => 1 },
         shared => { optional => 1 },
         disable => { optional => 1 },
-        maxfiles => { optional => 1 },
         'prune-backups' => { optional => 1 },
         'max-protected-backups' => { optional => 1 },
         content => { optional => 1 },
@@ -528,9 +527,6 @@ sub volume_snapshot {
         $path = raw_file_to_subvol($path);
         $snap_path = raw_file_to_subvol($snap_path);
     }
-
-    my $snapshot_dir = $class->get_subdir($scfg, 'images') . "/$vmid";
-    mkpath $snapshot_dir;
 
     $class->btrfs_cmd(['subvolume', 'snapshot', '-r', '--', $path, $snap_path]);
     return undef;

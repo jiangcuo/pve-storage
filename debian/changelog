@@ -1,3 +1,72 @@
+libpve-storage-perl (9.0.13) trixie; urgency=medium
+
+  * deactivate volumes: terminate error message with newline.
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 01 Aug 2025 18:36:51 +0200
+
+libpve-storage-perl (9.0.12) trixie; urgency=medium
+
+  * plugin: fix parse_name_dir regression for custom volume names.
+
+  * fix #6584: plugin: list_images: only include parseable filenames.
+
+  * plugin: extend snapshot name parsing to legacy volnames.
+
+  * plugin: parse_name_dir: drop noisy deprecation warning.
+
+  * plugin: nfs, cifs: use volume qemu snapshot methods from dir plugin to
+    ensure a online-snapshot on such storage types with
+    snapshot-as-volume-chain enabled does not takes a internal qcow2 snapshot.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 31 Jul 2025 14:22:12 +0200
+
+libpve-storage-perl (9.0.11) trixie; urgency=medium
+
+  * lvm volume snapshot info: untaint snapshot filename
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 31 Jul 2025 09:18:56 +0200
+
+libpve-storage-perl (9.0.10) trixie; urgency=medium
+
+  * RRD metrics: use new pve-storage-9.0 format RRD file location, if it
+    exists.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 31 Jul 2025 04:14:19 +0200
+
+libpve-storage-perl (9.0.9) trixie; urgency=medium
+
+  * fix #5181: pbs: store and read passwords as unicode.
+
+  * fix #6587: lvm plugin: snapshot info: fix parsing snapshot name.
+
+  * config: drop 'maxfiles' parameter, it was replaced with the more flexible
+    prune options in Proxmox VE 7.0 already.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 30 Jul 2025 19:51:07 +0200
+
+libpve-storage-perl (9.0.8) trixie; urgency=medium
+
+  * snapshot-as-volume-chain: fix offline removal of snapshot on directory
+    storage via UI/API by untainting/validating a filename correctly.
+
+  * snapshot-as-volume-chain: fix typo in log message for rebase operation.
+
+  * snapshot-as-volume-chain: ensure backing file references are kept relative
+    upon snapshot deletion. This ensures the backing chain stays intact should
+    the volumes be moved to a different path.
+
+  * fix #6561: ZFS: ensure refquota for container volumes is correctly applied
+    after rollback. The quota is tracked via a ZFS user property.
+
+  * btrfs plugin: remove unnecessary mkpath call
+
+  * drop some left-overs for 'rootdir' sub-directory handling that were
+    left-over from when Proxmox VE supported OpenVZ.
+
+  * path to volume ID conversion: properly quote regexes for hardening.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 29 Jul 2025 17:17:11 +0200
+
 libpve-storage-perl (9.0.7) trixie; urgency=medium
 
   * fix #6553: lvmthin: implement volume_rollback_is_possible sub

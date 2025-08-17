@@ -159,13 +159,6 @@ my $defaultData = {
             type => 'boolean',
             optional => 1,
         },
-        maxfiles => {
-            description => "Deprecated: use 'prune-backups' instead. "
-                . "Maximal number of backup files per VM. Use '0' for unlimited.",
-            type => 'integer',
-            minimum => 0,
-            optional => 1,
-        },
         'prune-backups' => get_standard_option('prune-backups'),
         'max-protected-backups' => {
             description =>
@@ -709,9 +702,9 @@ sub cluster_lock_storage {
 }
 
 my sub parse_snap_name {
-    my ($name) = @_;
+    my ($filename, $volname) = @_;
 
-    if ($name =~ m/^snap-(.*)-vm(.*)$/) {
+    if ($filename =~ m/^snap-(.*)-\Q$volname\E$/) {
         return $1;
     }
 }
@@ -722,8 +715,10 @@ sub parse_name_dir {
     if ($name =~ m!^((vm-|base-|subvol-)(\d+)-[^/\s]+\.(raw|qcow2|vmdk|subvol))$!) {
         my $isbase = $2 eq 'base-' ? $2 : undef;
         return ($1, $4, $isbase); # (name, format, isBase)
+    } elsif ($name =~ m!^snap-.*\.qcow2$!) {
+        die "'$name' is a snapshot filename, not a volume!\n";
     } elsif ($name =~ m!^((base-)?[^/\s]+\.(raw|qcow2|vmdk|subvol))$!) {
-        warn "this volume name `$name` is not supported anymore\n" if !parse_snap_name($name);
+        return ($1, $3, $2); # (name ,format, isBase)
     }
 
     die "unable to parse volume filename '$name'\n";
@@ -746,8 +741,6 @@ sub parse_volname {
         return ('iso', $1, undef, undef, undef, undef, 'raw');
     } elsif ($volname =~ m!^vztmpl/([^/]+$PVE::Storage::VZTMPL_EXT_RE_1)$!) {
         return ('vztmpl', $1, undef, undef, undef, undef, 'raw');
-    } elsif ($volname =~ m!^rootdir/(\d+)$!) {
-        return ('rootdir', $1, $1);
     } elsif ($volname =~ m!^backup/([^/]+$PVE::Storage::BACKUP_EXT_RE_2)$!) {
         my $fn = $1;
         if ($fn =~ m/^vzdump-(openvz|lxc|qemu)-(\d+)-.+/) {
@@ -1479,21 +1472,21 @@ sub volume_snapshot_delete {
 
         } else {
             #we rebase the child image on the parent as new backing image
-            my $parentpath = $snapshots->{$parentsnap}->{file};
             print
                 "$volname: deleting snapshot '$snap' by rebasing '$childsnap' on top of '$parentsnap'\n";
-            print "running 'qemu-img rebase -b $parentpath -F qcow -f qcow2 $childpath'\n";
+            my $rel_parent_path = get_snap_name($class, $volname, $parentsnap);
             $cmd = [
                 '/usr/bin/qemu-img',
                 'rebase',
                 '-b',
-                $parentpath,
+                $rel_parent_path,
                 '-F',
                 'qcow2',
                 '-f',
                 'qcow2',
                 $childpath,
             ];
+            print "running '" . join(' ', $cmd->@*) . "'\n";
             eval { run_command($cmd) };
             if ($@) {
                 #in case of abort, the state of the snap is still clean, just a little bit bigger
@@ -1605,6 +1598,10 @@ sub list_images {
         my $format = $4;
 
         next if !$vollist && defined($vmid) && ($owner ne $vmid);
+
+        # skip files that are snapshots or have invalid names
+        my ($parsed_name) = eval { parse_name_dir(basename($fn)) };
+        next if !defined($parsed_name);
 
         my ($size, undef, $used, $parent, $ctime) = eval { file_size_info($fn, undef, $format); };
         if (my $err = $@) {
@@ -1800,7 +1797,7 @@ sub volume_snapshot_info {
 
         my $name = basename($path);
 
-        if (my $snapname = parse_snap_name($name)) {
+        if (my $snapname = parse_snap_name($name, basename($volname))) {
             return $snapname;
         } elsif ($name eq basename($volname)) {
             return 'current';
@@ -1834,6 +1831,7 @@ sub volume_snapshot_info {
         my $snapshots = $json_decode;
         for my $snap (@$snapshots) {
             my $snapfile = $snap->{filename};
+            ($snapfile) = $snapfile =~ m|^(/.*)|; # untaint
             my $snapname = $get_snapname_from_path->($volname, $snapfile);
             #not a proxmox snapshot
             next if !$snapname;
