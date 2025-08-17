@@ -18,30 +18,36 @@ sub iscsi_ls {
     my ($scfg) = @_;
 
     my $portal = $scfg->{portal};
-    my $cmd = ['/usr/bin/iscsi-ls', '-s', 'iscsi://'.$portal ];
+    my $cmd = ['/usr/bin/iscsi-ls', '-s', 'iscsi://' . $portal];
     my $list = {};
     my %unittobytes = (
-       "k"  => 1024,
-       "M" => 1024*1024,
-       "G" => 1024*1024*1024,
-       "T"   => 1024*1024*1024*1024
+        "k" => 1024,
+        "M" => 1024 * 1024,
+        "G" => 1024 * 1024 * 1024,
+        "T" => 1024 * 1024 * 1024 * 1024,
     );
     eval {
-	    run_command($cmd, errmsg => "iscsi error", errfunc => sub {}, outfunc => sub {
-		my $line = shift;
-		$line = trim($line);
-		if( $line =~ /Lun:(\d+)\s+([A-Za-z0-9\-\_\.\:]*)\s+\(Size:([0-9\.]*)(k|M|G|T)\)/ ) {
-		    my $image = "lun".$1;
-		    my $size = $3;
-		    my $unit = $4;
+        run_command(
+            $cmd,
+            errmsg => "iscsi error",
+            errfunc => sub { },
+            outfunc => sub {
+                my $line = shift;
+                $line = trim($line);
+                if ($line =~ /Lun:(\d+)\s+([A-Za-z0-9\-\_\.\:]*)\s+\(Size:([0-9\.]*)(k|M|G|T)\)/
+                ) {
+                    my $image = "lun" . $1;
+                    my $size = $3;
+                    my $unit = $4;
 
-		    $list->{$image} = {
-			name => $image,
-			size => $size * $unittobytes{$unit},
-			format => 'raw',
-		    };
-		}
-	    });
+                    $list->{$image} = {
+                        name => $image,
+                        size => $size * $unittobytes{$unit},
+                        format => 'raw',
+                    };
+                }
+            },
+        );
     };
 
     my $err = $@;
@@ -58,9 +64,9 @@ sub type {
 
 sub plugindata {
     return {
-	content => [ {images => 1, none => 1}, { images => 1 }],
-	select_existing => 1,
-	'sensitive-properties' => {},
+        content => [{ images => 1, none => 1 }, { images => 1 }],
+        select_existing => 1,
+        'sensitive-properties' => {},
     };
 }
 
@@ -68,9 +74,9 @@ sub options {
     return {
         portal => { fixed => 1 },
         target => { fixed => 1 },
-        nodes => { optional => 1},
-        disable => { optional => 1},
-        content => { optional => 1},
+        nodes => { optional => 1 },
+        disable => { optional => 1 },
+        content => { optional => 1 },
         bwlimit => { optional => 1 },
     };
 }
@@ -80,9 +86,8 @@ sub options {
 sub parse_volname {
     my ($class, $volname) = @_;
 
-
     if ($volname =~ m/^lun(\d+)$/) {
-	return ('images', $1, undef, undef, undef, undef, 'raw');
+        return ('images', $1, undef, undef, undef, undef, 'raw');
     }
 
     die "unable to parse iscsi volume name '$volname'\n";
@@ -92,8 +97,8 @@ sub parse_volname {
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
-    die "volume snapshot is not possible on iscsi device"
-	if defined($snapname);
+    die "volume snapshot is not possible on iscsi device\n"
+        if defined($snapname);
 
     my ($vtype, $lun, $vmid) = $class->parse_volname($volname);
 
@@ -138,20 +143,20 @@ sub list_images {
 
     my $dat = iscsi_ls($scfg);
     foreach my $volname (keys %$dat) {
-	my $volid = "$storeid:$volname";
+        my $volid = "$storeid:$volname";
 
-	if ($vollist) {
-	    my $found = grep { $_ eq $volid } @$vollist;
-	    next if !$found;
-	} else {
-	    # we have no owner for iscsi devices
-	    next if defined($vmid);
-	}
+        if ($vollist) {
+            my $found = grep { $_ eq $volid } @$vollist;
+            next if !$found;
+        } else {
+            # we have no owner for iscsi devices
+            next if defined($vmid);
+        }
 
-	my $info = $dat->{$volname};
-	$info->{volid} = $volid;
+        my $info = $dat->{$volname};
+        $info->{volid} = $volid;
 
-	push @$res, $info;
+        push @$res, $info;
     }
 
     return $res;
@@ -164,7 +169,7 @@ sub status {
     my $free = 0;
     my $used = 0;
     my $active = 1;
-    return ($total,$free,$used,$active);
+    return ($total, $free, $used, $active);
 
     return undef;
 }
@@ -182,7 +187,7 @@ sub deactivate_storage {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
-    die "volume snapshot is not possible on iscsi device" if $snapname;
+    die "volume snapshot is not possible on iscsi device\n" if $snapname;
 
     return 1;
 }
@@ -190,7 +195,7 @@ sub activate_volume {
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
-    die "volume snapshot is not possible on iscsi device" if $snapname;
+    die "volume snapshot is not possible on iscsi device\n" if $snapname;
 
     return 1;
 }
@@ -206,39 +211,38 @@ sub volume_size_info {
 
 sub volume_resize {
     my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
-    die "volume resize is not possible on iscsi device";
+    die "volume resize is not possible on iscsi device\n";
 }
 
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
-    die "volume snapshot is not possible on iscsi device";
+    die "volume snapshot is not possible on iscsi device\n";
 }
 
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
-    die "volume snapshot rollback is not possible on iscsi device";
+    die "volume snapshot rollback is not possible on iscsi device\n";
 }
 
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
-    die "volume snapshot delete is not possible on iscsi device";
+    die "volume snapshot delete is not possible on iscsi device\n";
 }
 
 sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
     my $features = {
-	copy => { current => 1},
+        copy => { current => 1 },
     };
 
-    my ($vtype, $name, $vmid, $basename, $basevmid, $isBase) =
-	$class->parse_volname($volname);
+    my ($vtype, $name, $vmid, $basename, $basevmid, $isBase) = $class->parse_volname($volname);
 
     my $key = undef;
-    if($snapname){
-	$key = 'snap';
-    }else{
-	$key =  $isBase ? 'base' : 'current';
+    if ($snapname) {
+        $key = 'snap';
+    } else {
+        $key = $isBase ? 'base' : 'current';
     }
     return 1 if $features->{$feature}->{$key};
 
@@ -256,15 +260,15 @@ sub volume_export_formats {
 
 sub volume_export {
     my (
-	$class,
-	$scfg,
-	$storeid,
-	$fh,
-	$volname,
-	$format,
-	$snapshot,
-	$base_snapshot,
-	$with_snapshots,
+        $class,
+        $scfg,
+        $storeid,
+        $fh,
+        $volname,
+        $format,
+        $snapshot,
+        $base_snapshot,
+        $with_snapshots,
     ) = @_;
 
     die "volume export format $format not available for $class\n" if $format ne 'raw+size';
@@ -276,8 +280,8 @@ sub volume_export {
 
     my $json = '';
     run_command(
-	['/usr/bin/qemu-img', 'info', '-f', 'raw', '--output=json', $file],
-	outfunc => sub { $json .= shift },
+        ['/usr/bin/qemu-img', 'info', '-f', 'raw', '--output=json', $file],
+        outfunc => sub { $json .= shift },
     );
     die "failed to query size information for '$file' with qemu-img\n" if !$json;
     my $info = eval { decode_json($json) };
@@ -289,8 +293,8 @@ sub volume_export {
 
     PVE::Storage::Plugin::write_common_header($fh, $size);
     run_command(
-	['qemu-img', 'dd', 'bs=64k', "if=$file", '-f', 'raw', '-O', 'raw'],
-	output => '>&'.fileno($fh),
+        ['qemu-img', 'dd', 'bs=64k', "if=$file", '-f', 'raw', '-O', 'raw'],
+        output => '>&' . fileno($fh),
     );
     return;
 }
