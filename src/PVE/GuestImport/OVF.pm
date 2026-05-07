@@ -12,6 +12,7 @@ use Cwd 'realpath';
 
 use PVE::Tools;
 use PVE::Storage;
+use PVE::Seccomp qw(stmt /^BPF_/);
 
 # map OVF resources types to descriptive strings
 # this will allow us to explore the xml tree without using magic numbers
@@ -167,25 +168,28 @@ sub try_parse_capacity_unit {
     return undef;
 }
 
+my sub read_ovf_file {
+    my ($ovf, $isOva) = @_;
+
+    return PVE::Tools::file_get_contents($ovf) if !$isOva;
+
+    my $raw = "";
+    PVE::Tools::run_command(
+        ['tar', '-xO', '--wildcards', '--occurrence=1', '-f', $ovf, '*.ovf'],
+        outfunc => sub {
+            my $line = shift;
+            $raw .= $line;
+        },
+    );
+    return $raw;
+}
+
 # returns two references, $qm which holds qm.conf style key/values, and \@disks
-sub parse_ovf {
-    my ($ovf, $isOva, $debug) = @_;
+my sub parse_ovf_do {
+    my ($ovf, $ovf_data, $isOva, $debug) = @_;
 
     # we have to ignore missing disk images for ova
-    my $dom;
-    if ($isOva) {
-        my $raw = "";
-        PVE::Tools::run_command(
-            ['tar', '-xO', '--wildcards', '--occurrence=1', '-f', $ovf, '*.ovf'],
-            outfunc => sub {
-                my $line = shift;
-                $raw .= $line;
-            },
-        );
-        $dom = XML::LibXML->load_xml(string => $raw, no_blanks => 1);
-    } else {
-        $dom = XML::LibXML->load_xml(location => $ovf, no_blanks => 1);
-    }
+    my $dom = XML::LibXML->load_xml(string => $ovf_data, no_blanks => 1);
 
     # register the xml namespaces in a xpath context object
     # 'ovf' is the default namespace so it will prepended to each xml element
@@ -274,8 +278,6 @@ sub parse_ovf {
     # when all the nodes has been found out, we copy the relevant information to
     # a $pve_disk hash ref, which we push to @disks;
 
-    my $boot_order = [];
-
     for my $item_node (@disk_items) {
         my ($disk_node, $file_node, $controller_node, $pve_disk);
 
@@ -359,6 +361,46 @@ ovf:Item[rasd:InstanceID='%s']/rasd:ResourceType", $controller_id,
         die "referenced path '$original_filepath' is invalid\n"
             if !$filepath || $filepath eq "." || $filepath eq "..";
 
+        push @disks,
+            {
+                filepath => $filepath,
+                virtual_size => $virtual_size,
+                disk_address => $pve_disk_address,
+            };
+    }
+
+    my $nic_id = dtmf_name_to_id('Ethernet Adapter');
+    my $xpath_find_nics =
+        "/ovf:Envelope/ovf:VirtualSystem/ovf:VirtualHardwareSection/ovf:Item[rasd:ResourceType=${nic_id}]";
+    my @nic_items = $xpc->findnodes($xpath_find_nics);
+
+    my $net = {};
+
+    my $net_count = 0;
+    for my $item_node (@nic_items) {
+        my $model = $xpc->findvalue('rasd:ResourceSubType', $item_node);
+        $model = lc($model);
+        $model = 'e1000' if !grep { $_ eq $model } @$allowed_nic_models;
+        $net->{"net${net_count}"} = { model => $model };
+        $net_count++;
+    }
+
+    return { qm => $qm, disks => \@disks, net => $net };
+}
+
+my sub resolve_disks {
+    my ($ovf, $qm, $isOva) = @_;
+
+    my $boot_order = [];
+
+    my $parsed_disks = delete($qm->{disks});
+
+    my @disks;
+    for my $disk (@$parsed_disks) {
+        my $filepath = $disk->{filepath};
+        my $virtual_size = $disk->{virtual_size};
+        my $pve_disk_address = $disk->{disk_address};
+
         # resolve symlinks and relative path components
         # and die if the diskimage is not somewhere under the $ovf path
         my $ovf_dir = realpath(dirname(File::Spec->rel2abs($ovf)))
@@ -382,7 +424,8 @@ ovf:Item[rasd:InstanceID='%s']/rasd:ResourceType", $controller_id,
 
             $virtual_size = $size;
         }
-        $pve_disk = {
+
+        my $pve_disk = {
             disk_address => $pve_disk_address,
             backing_file => $backing_file_path,
             virtual_size => $virtual_size,
@@ -393,25 +436,46 @@ ovf:Item[rasd:InstanceID='%s']/rasd:ResourceType", $controller_id,
         push @$boot_order, $pve_disk_address;
     }
 
-    $qm->{boot} = "order=" . join(';', @$boot_order) if scalar(@$boot_order) > 0;
+    $qm->{qm}->{boot} = "order=" . join(';', @$boot_order) if scalar(@$boot_order) > 0;
 
-    my $nic_id = dtmf_name_to_id('Ethernet Adapter');
-    my $xpath_find_nics =
-        "/ovf:Envelope/ovf:VirtualSystem/ovf:VirtualHardwareSection/ovf:Item[rasd:ResourceType=${nic_id}]";
-    my @nic_items = $xpc->findnodes($xpath_find_nics);
+    $qm->{disks} = \@disks;
+    return;
+}
 
-    my $net = {};
+my sub bpf_prog {
+    return [
+        stmt(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0),
+        stmt(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, PVE::Syscall::write),
+        stmt(BPF_JMP | BPF_JEQ | BPF_K, 3, 0, PVE::Syscall::exit),
+        stmt(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, PVE::Syscall::exit_group),
+        stmt(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, PVE::Syscall::brk),
+        stmt(BPF_RET | BPF_K, 0, 0, BPF_RET_KILL), # default: no syscall matched, kill the process
+        stmt(BPF_RET | BPF_K, 0, 0, BPF_RET_ALLOW), # a syscall above matched, allow it
+    ];
+}
 
-    my $net_count = 0;
-    for my $item_node (@nic_items) {
-        my $model = $xpc->findvalue('rasd:ResourceSubType', $item_node);
-        $model = lc($model);
-        $model = 'e1000' if !grep { $_ eq $model } @$allowed_nic_models;
-        $net->{"net${net_count}"} = { model => $model };
-        $net_count++;
+sub parse_ovf {
+    my ($ovf, $isOva, $debug) = @_;
+
+    my $qm = PVE::Tools::run_fork_with_timeout(
+        3,
+        sub {
+            my $ovf_data = read_ovf_file($ovf, $isOva);
+
+            PVE::Seccomp::set_no_new_privs();
+            PVE::Seccomp::set_filter(bpf_prog());
+
+            return parse_ovf_do($ovf, $ovf_data, $isOva, $debug);
+        },
+    );
+
+    if (!$qm) {
+        die "OVF parser terminated unexpectedly trying to parse $ovf\n";
     }
 
-    return { qm => $qm, disks => \@disks, net => $net };
+    resolve_disks($ovf, $qm, $isOva);
+
+    return $qm;
 }
 
 1;
