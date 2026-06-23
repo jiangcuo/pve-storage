@@ -9,14 +9,17 @@ libpve-storage-perl (8.3.8+pxvirt2) bookworm; urgency=medium
 
   * api: storage: add new 'download' endpoint (GET
     /nodes/{node}/storage/{storage}/download?volume=...). It streams a
-    backup volume back to the client as application/octet-stream with a
-    Content-Disposition: attachment header, so the browser saves it under
-    the original filename. The volume parameter accepts either the full
-    'storeid:backup/file.vma.zst' form or the bare filename (which is
-    canonicalised against the requested storage). Access is gated by
-    check_volume_access(..., 'backup'), i.e. Datastore.AllocateSpace on
-    the storage plus VM.Backup on the owning VM (or Datastore.Allocate to
-    bypass the per-VM check).
+    file-based volume back to the client as application/octet-stream
+    with a Content-Disposition: attachment header, so the browser saves
+    it under the original filename. Supported volume types are
+    'backup', 'iso', 'vztmpl' and 'import' on file-based storages
+    (block-backed types like 'images' / 'rootdir' and storages without
+    a $scfg->{path} such as PBS are rejected with a clear error). The
+    volume parameter accepts either the full 'storeid:type/file' form
+    or the bare filename (which is, for backwards compatibility,
+    canonicalised against the storage's backup directory). Per-content
+    access is gated by the existing PVE::Storage::check_volume_access(),
+    which picks the appropriate privilege set per type.
 
  -- liyanglrf <liyang@lierfang.com>  Tue, 23 Jun 2026 16:57:46 +0000
 
