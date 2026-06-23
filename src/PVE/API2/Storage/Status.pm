@@ -262,6 +262,7 @@ __PACKAGE__->register_method({
 
         my $res = [
             { subdir => 'content' },
+            { subdir => 'download' },
             { subdir => 'download-url' },
             { subdir => 'file-restore' },
             { subdir => 'import-metadata' },
@@ -443,7 +444,7 @@ __PACKAGE__->register_method({
                 description => "Content type.",
                 type => 'string',
                 format => 'pve-storage-content',
-                enum => ['iso', 'vztmpl', 'import'],
+                enum => ['iso', 'vztmpl', 'import', 'backup'],
             },
             filename => {
                 description =>
@@ -528,6 +529,20 @@ __PACKAGE__->register_method({
             }
 
             $path = PVE::Storage::get_import_dir($cfg, $storage);
+        } elsif ($content eq 'backup') {
+            # Accept only the standard vzdump naming scheme so an uploaded
+            # archive is later recognised by parse_volname / the BackupView
+            # listing. Allowed extensions match BACKUP_EXT_RE_2 (.vma[.comp]
+            # / .tar[.comp] / .tgz).
+            if ($filename !~
+                m!^vzdump-(?:lxc|openvz|qemu)-[1-9][0-9]{2,8}-\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}$PVE::Storage::BACKUP_EXT_RE_2$!
+            ) {
+                raise_param_exc({
+                    filename => "must match vzdump-(lxc|openvz|qemu)-VMID-YYYY_MM_DD-HH_MM_SS"
+                        . ".(vma|tar|tgz)[.compressor] naming scheme",
+                });
+            }
+            $path = PVE::Storage::get_backup_dir($cfg, $storage);
         } else {
             raise_param_exc({ content => "upload content type '$content' not allowed" });
         }
@@ -641,6 +656,118 @@ __PACKAGE__->register_method({
         };
 
         return $rpcenv->fork_worker('imgcopy', undef, $user, $worker);
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'download',
+    path => '{storage}/download',
+    method => 'GET',
+    description => "Download a file from the storage. Currently supports backup archives"
+        . " (vzdump), ISO images, container templates and import images on file-based"
+        . " storages (storages with a \$scfg->{path}).",
+    proxyto => 'node',
+    download_allowed => 1,
+    permissions => {
+        description => "Per-volume access is checked via the standard"
+            . " PVE::Storage::check_volume_access() gate, which picks the appropriate"
+            . " privilege set based on the volume's content type.",
+        user => 'all',
+    },
+    protected => 1,
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            storage => get_standard_option(
+                'pve-storage-id',
+                {
+                    completion => \&PVE::Storage::complete_storage_enabled,
+                },
+            ),
+            volume => {
+                description => "Volume identifier. Either a full volume id like"
+                    . " 'local:iso/debian.iso' or 'local:backup/vzdump-qemu-100-...vma.zst',"
+                    . " or — for backwards compatibility — a bare filename, which is"
+                    . " assumed to live under the storage's backup directory.",
+                type => 'string',
+                completion => \&PVE::Storage::complete_volume,
+            },
+        },
+    },
+    returns => {
+        type => 'any', # streamed file, see below
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $user = $rpcenv->get_user();
+
+        my $storeid = $param->{storage};
+        my $volid = $param->{volume};
+
+        my $cfg = PVE::Storage::config();
+
+        # Re-parse and re-format the volume id so that callers can pass either
+        # the full 'storeid:type/file' form or — for backwards compatibility
+        # with the original backup-only iteration of this endpoint — a bare
+        # filename, which is assumed to live under the storage's backup
+        # directory. The full form is canonicalised against the requested
+        # storage so we reject cross-storage requests early.
+        my ($parsed_storeid, $volname) = PVE::Storage::parse_volume_id($volid, 1);
+        if (!defined($parsed_storeid)) {
+            $volid = "$storeid:backup/$volid";
+        } elsif ($parsed_storeid ne $storeid) {
+            raise_param_exc({
+                volume => "volume '$volid' is not on storage '$storeid'",
+            });
+        }
+
+        # Determine the content type from the volume id itself. Only volume
+        # types that map to a single, opaque file on disk are eligible: a
+        # backup archive, an ISO, a container template, or an import disk
+        # image. Block-device-backed volume types (images / rootdir) are
+        # intentionally rejected — streaming a raw LVM/RBD/ZVOL block device
+        # over HTTP is not a sensible UI operation.
+        my ($vtype) = PVE::Storage::parse_volname($cfg, $volid);
+        my %downloadable = map { $_ => 1 } qw(backup iso vztmpl import);
+        die "downloading volumes of type '$vtype' is not supported\n"
+            if !$downloadable{$vtype};
+
+        # check_volume_access knows which privileges each content type wants
+        # (e.g. backup -> Datastore.AllocateSpace + VM.Backup on the owning
+        # vmid; iso/vztmpl/import -> Datastore.AllocateSpace or .Audit).
+        PVE::Storage::check_volume_access($rpcenv, $user, $cfg, undef, $volid, $vtype);
+
+        # Reject storages that have no on-disk file representation up front,
+        # so users get a clear error instead of a confusing 'file missing'.
+        my $scfg = PVE::Storage::storage_config($cfg, $storeid);
+        die "can't download from storage type '$scfg->{type}', not a file based storage!\n"
+            if !defined($scfg->{path});
+
+        # activate_volumes makes sure file-based backings (NFS / CIFS mounts)
+        # are mounted before we open the file handle.
+        PVE::Storage::activate_volumes($cfg, [$volid]);
+
+        my $path = PVE::Storage::abs_filesystem_path($cfg, $volid);
+        die "file '$path' is missing\n" if !-f $path;
+
+        my $filename = basename($path);
+
+        # Mark the response as a streamed download so the APIServer hands the
+        # open file handle back to AnyEvent::Handle directly instead of
+        # buffering it through the JSON formatter. application/octet-stream is
+        # the safest content type for opaque blobs (.vma.zst, .iso, .tar.zst,
+        # .ova, ...): browsers won't try to display or decompress them.
+        return {
+            download => {
+                path => $path,
+                stream => 1,
+                'content-type' => 'application/octet-stream',
+                'content-disposition' => "attachment; filename=\"$filename\"",
+            },
+        };
     },
 });
 

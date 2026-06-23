@@ -1,3 +1,28 @@
+libpve-storage-perl (8.3.8+pxvirt2) bookworm; urgency=medium
+
+  * api: storage: upload: accept content type 'backup' for vzdump archives.
+    The filename must match the standard vzdump naming scheme
+    'vzdump-(lxc|openvz|qemu)-VMID-YYYY_MM_DD-HH_MM_SS' with one of the
+    BACKUP_EXT_RE_2 extensions (.vma[.comp] / .tar[.comp] / .tgz) so the
+    archive is later recognised by parse_volname() and the BackupView
+    listing. The file is dropped into get_backup_dir($cfg, $storage).
+
+  * api: storage: add new 'download' endpoint (GET
+    /nodes/{node}/storage/{storage}/download?volume=...). It streams a
+    file-based volume back to the client as application/octet-stream
+    with a Content-Disposition: attachment header, so the browser saves
+    it under the original filename. Supported volume types are
+    'backup', 'iso', 'vztmpl' and 'import' on file-based storages
+    (block-backed types like 'images' / 'rootdir' and storages without
+    a $scfg->{path} such as PBS are rejected with a clear error). The
+    volume parameter accepts either the full 'storeid:type/file' form
+    or the bare filename (which is, for backwards compatibility,
+    canonicalised against the storage's backup directory). Per-content
+    access is gated by the existing PVE::Storage::check_volume_access(),
+    which picks the appropriate privilege set per type.
+
+ -- liyanglrf <liyang@lierfang.com>  Tue, 23 Jun 2026 16:57:46 +0000
+
 libpve-storage-perl (8.3.8+pxvirt1) bookworm; urgency=medium
 
   * fix clone_image_pxvirt redefined
