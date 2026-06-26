@@ -262,6 +262,7 @@ __PACKAGE__->register_method({
 
         my $res = [
             { subdir => 'content' },
+            { subdir => 'download' },
             { subdir => 'download-url' },
             { subdir => 'file-restore' },
             { subdir => 'import-metadata' },
@@ -429,9 +430,10 @@ __PACKAGE__->register_method({
     name => 'upload',
     path => '{storage}/upload',
     method => 'POST',
-    description => "Upload templates, ISO images, OVAs and VM images.",
+    description => "Upload templates, ISO images, OVAs, VM images and backup archives.",
     permissions => {
-        check => ['perm', '/storage/{storage}', ['Datastore.AllocateTemplate']],
+        description => "You need allocation privileges for the selected content type.",
+        user => 'all',
     },
     protected => 1,
     parameters => {
@@ -443,7 +445,7 @@ __PACKAGE__->register_method({
                 description => "Content type.",
                 type => 'string',
                 format => 'pve-storage-content',
-                enum => ['iso', 'vztmpl', 'import'],
+                enum => ['iso', 'vztmpl', 'import', 'backup'],
             },
             filename => {
                 description =>
@@ -484,12 +486,18 @@ __PACKAGE__->register_method({
         my $cfg = PVE::Storage::config();
 
         my ($node, $storage) = $param->@{qw(node storage)};
+        my $content = $param->{content};
+
+        if ($content eq 'backup') {
+            $rpcenv->check($user, "/storage/$storage", ['Datastore.AllocateSpace']);
+        } else {
+            $rpcenv->check($user, "/storage/$storage", ['Datastore.AllocateTemplate']);
+        }
+
         my $scfg = PVE::Storage::storage_check_enabled($cfg, $storage, $node);
 
         die "can't upload to storage type '$scfg->{type}'\n"
             if !defined($scfg->{path});
-
-        my $content = $param->{content};
 
         my $tmpfilename = $param->{tmpfilename};
         die "missing temporary file name\n" if !$tmpfilename;
@@ -528,6 +536,18 @@ __PACKAGE__->register_method({
             }
 
             $path = PVE::Storage::get_import_dir($cfg, $storage);
+        } elsif ($content eq 'backup') {
+            my $archive_info = eval { PVE::Storage::archive_info($filename) };
+            if (my $err = $@) {
+                chomp($err);
+                $err =~ s/^ERROR:\s*//;
+                raise_param_exc({
+                    filename => "invalid vzdump archive name: $err",
+                });
+            }
+            raise_param_exc({ filename => "not a standard vzdump archive name" })
+                if !$archive_info->{is_std_name};
+            $path = PVE::Storage::get_backup_dir($cfg, $storage);
         } else {
             raise_param_exc({ content => "upload content type '$content' not allowed" });
         }
@@ -641,6 +661,87 @@ __PACKAGE__->register_method({
         };
 
         return $rpcenv->fork_worker('imgcopy', undef, $user, $worker);
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'download',
+    path => '{storage}/download',
+    method => 'GET',
+    description => "Download a file from a file-based storage.",
+    proxyto => 'node',
+    download_allowed => 1,
+    permissions => {
+        description => "You need read access for the volume.",
+        user => 'all',
+    },
+    protected => 1,
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            storage => get_standard_option(
+                'pve-storage-id',
+                {
+                    completion => \&PVE::Storage::complete_storage_enabled,
+                },
+            ),
+            volume => {
+                description => "Volume identifier, or a backup archive filename.",
+                type => 'string',
+                completion => \&PVE::Storage::complete_volume,
+            },
+        },
+    },
+    returns => {
+        type => 'any', # streamed file, see below
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $user = $rpcenv->get_user();
+
+        my $storeid = $param->{storage};
+        my $volid = $param->{volume};
+
+        my $cfg = PVE::Storage::config();
+        my $scfg = PVE::Storage::storage_check_enabled($cfg, $storeid);
+
+        my ($parsed_storeid, $volname) = PVE::Storage::parse_volume_id($volid, 1);
+        if (!defined($parsed_storeid)) {
+            $volid = "$storeid:backup/$volid";
+        } elsif ($parsed_storeid ne $storeid) {
+            raise_param_exc({
+                volume => "volume '$volid' is not on storage '$storeid'",
+            });
+        }
+
+        my ($vtype) = PVE::Storage::parse_volname($cfg, $volid);
+        my %downloadable = map { $_ => 1 } qw(backup iso vztmpl import);
+        die "downloading volumes of type '$vtype' is not supported\n"
+            if !$downloadable{$vtype};
+
+        die "storage '$storeid' does not support '$vtype' content\n"
+            if !$scfg->{content}->{$vtype};
+
+        PVE::Storage::check_volume_access($rpcenv, $user, $cfg, undef, $volid, $vtype);
+
+        die "can't download from storage type '$scfg->{type}', not a file based storage!\n"
+            if !defined($scfg->{path});
+
+        my $path = PVE::Storage::abs_filesystem_path($cfg, $volid);
+        my $filename = basename($path);
+        $filename =~ s/[^A-Za-z0-9._+-]/_/g;
+
+        return {
+            download => {
+                path => $path,
+                stream => 1,
+                'content-type' => 'application/octet-stream',
+                'content-disposition' => "attachment; filename=\"$filename\"",
+            },
+        };
     },
 });
 
