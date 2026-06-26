@@ -68,9 +68,14 @@ PVE::Storage::BTRFSPlugin->register();
 PVE::Storage::ESXiPlugin->register();
 
 # load third-party plugins
-if (-d '/usr/share/perl5/PVE/Storage/Custom') {
+my $custom_plugin_dirs = {};
+foreach my $inc (@INC) {
+    my $dir = "$inc/PVE/Storage/Custom";
+    next if !-d $dir;
+    next if $custom_plugin_dirs->{$dir}++;
+
     dir_glob_foreach(
-        '/usr/share/perl5/PVE/Storage/Custom',
+        $dir,
         '.*\.pm$',
         sub {
             my ($file) = @_;
