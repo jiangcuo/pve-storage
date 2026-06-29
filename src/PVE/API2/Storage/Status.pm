@@ -537,7 +537,7 @@ __PACKAGE__->register_method({
 
             $path = PVE::Storage::get_import_dir($cfg, $storage);
         } elsif ($content eq 'backup') {
-            my $archive_info = eval { PVE::Storage::archive_info($filename) };
+            eval { PVE::Storage::archive_info($filename) };
             if (my $err = $@) {
                 chomp($err);
                 $err =~ s/^ERROR:\s*//;
@@ -545,8 +545,6 @@ __PACKAGE__->register_method({
                     filename => "invalid vzdump archive name: $err",
                 });
             }
-            raise_param_exc({ filename => "not a standard vzdump archive name" })
-                if !$archive_info->{is_std_name};
             $path = PVE::Storage::get_backup_dir($cfg, $storage);
         } else {
             raise_param_exc({ content => "upload content type '$content' not allowed" });
