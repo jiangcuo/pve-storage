@@ -1,3 +1,15 @@
+libpve-storage-perl (8.3.8+pxvirt2) bookworm; urgency=medium
+
+  * api: allow uploading vzdump backup archives to file-based storages.
+
+  * api: add file download endpoint for supported file-based storage content,
+    including backups, ISO images, container templates and import files.
+
+  * plugin: load third-party storage plugins from all Perl INC paths instead
+    of only the system perl5 directory.
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Mon, 29 Jun 2026 11:43:47 +0800
+
 libpve-storage-perl (8.3.8+pxvirt1) bookworm; urgency=medium
 
   * fix clone_image_pxvirt redefined
