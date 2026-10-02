@@ -2379,6 +2379,7 @@ sub get_iso_info {
     die "pxvirt-isoinfo is not installed\n" if !-x $ISOINFO;
 
     my $path = abs_filesystem_path($cfg, $volid);
+    ($path) = $path =~ m|^(/.+)$|; # untaint, also called during VM start
 
     my $json = '';
     run_command(
