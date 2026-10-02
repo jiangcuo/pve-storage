@@ -430,9 +430,11 @@ __PACKAGE__->register_method({
     name => 'upload',
     path => '{storage}/upload',
     method => 'POST',
-    description => "Upload templates, ISO images, OVAs, VM images and backup archives.",
+    description =>
+        "Upload templates, ISO images, OVAs, VM images, backup archives and snippets.",
     permissions => {
-        description => "You need allocation privileges for the selected content type.",
+        description => "You need allocation privileges for the selected content type."
+            . " Uploading snippets requires 'Datastore.Allocate'.",
         user => 'all',
     },
     protected => 1,
@@ -445,7 +447,7 @@ __PACKAGE__->register_method({
                 description => "Content type.",
                 type => 'string',
                 format => 'pve-storage-content',
-                enum => ['iso', 'vztmpl', 'import', 'backup'],
+                enum => ['iso', 'vztmpl', 'import', 'backup', 'snippets'],
             },
             filename => {
                 description =>
@@ -490,6 +492,9 @@ __PACKAGE__->register_method({
 
         if ($content eq 'backup') {
             $rpcenv->check($user, "/storage/$storage", ['Datastore.AllocateSpace']);
+        } elsif ($content eq 'snippets') {
+            # snippets can be used as hook scripts, so treat them like other sensitive content
+            $rpcenv->check($user, "/storage/$storage", ['Datastore.Allocate']);
         } else {
             $rpcenv->check($user, "/storage/$storage", ['Datastore.AllocateTemplate']);
         }
@@ -546,6 +551,12 @@ __PACKAGE__->register_method({
                 });
             }
             $path = PVE::Storage::get_backup_dir($cfg, $storage);
+        } elsif ($content eq 'snippets') {
+            raise_param_exc({ filename => "invalid filename" })
+                if $filename !~ m!^${PVE::Storage::SAFE_CHAR_CLASS_RE}+$! || $filename =~ m/^\./;
+            raise_param_exc({ filename => "snippets must not be larger than 1 MiB" })
+                if $size > 1024 * 1024;
+            $path = PVE::Storage::get_snippets_dir($cfg, $storage);
         } else {
             raise_param_exc({ content => "upload content type '$content' not allowed" });
         }
@@ -580,6 +591,17 @@ __PACKAGE__->register_method({
                 errmsg => "mkdir failed",
             );
 
+            if ($content eq 'snippets') {
+                # never overwrite existing snippets, they might be (executable) hook scripts
+                eval {
+                    run_command(
+                        [@remcmd, '/usr/bin/test', '!', '-e', PVE::Tools::shell_quote($dest)],
+                        quiet => 1,
+                    );
+                };
+                raise_param_exc({ filename => "snippet '$filename' already exists" }) if $@;
+            }
+
             $cmd = [
                 '/usr/bin/scp',
                 $ssh_options->@*,
@@ -593,6 +615,9 @@ __PACKAGE__->register_method({
         } else {
             PVE::Storage::activate_storage($cfg, $storage);
             File::Path::make_path($dirname);
+            # never overwrite existing snippets, they might be (executable) hook scripts
+            raise_param_exc({ filename => "snippet '$filename' already exists" })
+                if $content eq 'snippets' && -e $dest;
             $cmd = ['cp', '--', $tmpfilename, $dest];
         }
 
@@ -716,7 +741,7 @@ __PACKAGE__->register_method({
         }
 
         my ($vtype) = PVE::Storage::parse_volname($cfg, $volid);
-        my %downloadable = map { $_ => 1 } qw(backup iso vztmpl import);
+        my %downloadable = map { $_ => 1 } qw(backup iso vztmpl import snippets);
         die "downloading volumes of type '$vtype' is not supported\n"
             if !$downloadable{$vtype};
 

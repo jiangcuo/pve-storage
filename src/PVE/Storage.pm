@@ -499,6 +499,15 @@ sub get_import_dir {
     return $plugin->get_subdir($scfg, 'import');
 }
 
+sub get_snippets_dir {
+    my ($cfg, $storeid) = @_;
+
+    my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    return $plugin->get_subdir($scfg, 'snippets');
+}
+
 sub get_vztmpl_dir {
     my ($cfg, $storeid) = @_;
 
