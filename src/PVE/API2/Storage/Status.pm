@@ -266,6 +266,7 @@ __PACKAGE__->register_method({
             { subdir => 'download-url' },
             { subdir => 'file-restore' },
             { subdir => 'import-metadata' },
+            { subdir => 'iso-info' },
             { subdir => 'prunebackups' },
             { subdir => 'rrd' },
             { subdir => 'rrddata' },
@@ -1060,6 +1061,98 @@ __PACKAGE__->register_method({
                 return PVE::Storage::get_import_metadata($cfg, $volid);
             },
         );
+    },
+});
+
+
+__PACKAGE__->register_method({
+    name => 'get_iso_info',
+    path => '{storage}/iso-info',
+    method => 'GET',
+    description => "Detect the operating system on an ISO image.",
+    proxyto => 'node',
+    permissions => {
+        description => "You need read access for the volume.",
+        user => 'all',
+    },
+    protected => 1,
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            storage => get_standard_option('pve-storage-id'),
+            volume => {
+                description => "Volume identifier of the ISO image.",
+                type => 'string',
+            },
+        },
+    },
+    returns => {
+        type => "object",
+        additionalProperties => 1,
+        properties => {
+            type => {
+                type => 'string',
+                enum => ['windows', 'linux', 'unknown'],
+                description => 'The type of operating system.',
+            },
+            id => {
+                type => 'string',
+                optional => 1,
+                description => 'Identifier of the detected operating system.',
+            },
+            name => {
+                type => 'string',
+                optional => 1,
+                description => 'Name of the detected operating system.',
+            },
+            version => {
+                type => 'string',
+                optional => 1,
+            },
+            arch => {
+                type => 'string',
+                optional => 1,
+            },
+            installer => {
+                type => 'string',
+                optional => 1,
+                description => 'Supported autoinstall type.',
+            },
+            ostype => {
+                type => 'string',
+                optional => 1,
+                description => 'Guest OS type.',
+            },
+            images => {
+                type => 'array',
+                optional => 1,
+                description => 'Images contained in a Windows installation medium.',
+                items => {
+                    type => 'object',
+                    additionalProperties => 1,
+                    properties => {
+                        index => { type => 'integer' },
+                        name => { type => 'string' },
+                    },
+                },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $authuser = $rpcenv->get_user();
+
+        my ($storeid, $volume) = $param->@{qw(storage volume)};
+        my $volid = $volume =~ m/^\Q$storeid\E:/ ? $volume : "$storeid:$volume";
+
+        my $cfg = PVE::Storage::config();
+
+        PVE::Storage::check_volume_access($rpcenv, $authuser, $cfg, undef, $volid, 'iso');
+
+        return PVE::Storage::get_iso_info($cfg, $volid);
     },
 });
 
