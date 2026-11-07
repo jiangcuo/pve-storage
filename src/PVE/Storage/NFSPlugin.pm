@@ -104,6 +104,7 @@ sub options {
         'create-subdirs' => { optional => 1 },
         bwlimit => { optional => 1 },
         preallocation => { optional => 1 },
+        'snapshot-as-volume-chain' => { optional => 1, fixed => 1 },
     };
 }
 
@@ -239,6 +240,10 @@ sub update_volume_attribute {
 
 sub get_import_metadata {
     return PVE::Storage::DirPlugin::get_import_metadata(@_);
+}
+
+sub volume_qemu_snapshot_method {
+    return PVE::Storage::DirPlugin::volume_qemu_snapshot_method(@_);
 }
 
 1;

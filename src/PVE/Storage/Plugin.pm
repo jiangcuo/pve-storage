@@ -228,6 +228,13 @@ my $defaultData = {
             maximum => 65535,
             optional => 1,
         },
+        'snapshot-as-volume-chain' => {
+            type => 'boolean',
+            description => 'Enable support for creating storage-vendor agnostic snapshot'
+                . ' through volume backing-chains.',
+            default => 0,
+            optional => 1,
+        },
     },
 };
 
@@ -280,19 +287,30 @@ sub storage_has_feature {
     return;
 }
 
+sub get_formats {
+    my ($class, $scfg, $storeid) = @_;
+
+    my $type = $scfg->{type};
+    my $plugin_data = $defaultData->{plugindata}->{$type};
+
+    return { default => 'raw', valid => { raw => 1 } } if !defined($plugin_data->{format});
+
+    return {
+        default => $scfg->{format} || $plugin_data->{format}->[1],
+        # copy rather than passing direct reference
+        valid => { $plugin_data->{format}->[0]->%* },
+    };
+}
+
+# Deprecated, kept for compatibility. Use the get_formats() plugin method instead.
 sub default_format {
     my ($scfg) = @_;
 
-    my $type = $scfg->{type};
-    my $def = $defaultData->{plugindata}->{$type};
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+    my $formats = $plugin->get_formats($scfg, undef);
 
-    my $def_format = 'raw';
-    my $valid_formats = [$def_format];
-
-    if (defined($def->{format})) {
-        $def_format = $scfg->{format} || $def->{format}->[1];
-        $valid_formats = [sort keys %{ $def->{format}->[0] }];
-    }
+    my $def_format = $formats->{default};
+    my $valid_formats = [sort keys $formats->{valid}->%*];
 
     return wantarray ? ($def_format, $valid_formats) : $def_format;
 }
@@ -631,6 +649,31 @@ sub preallocation_cmd_option {
     return;
 }
 
+sub preallocation_cmd_opt {
+    my ($scfg, $fmt) = @_;
+
+    my $prealloc = $scfg->{preallocation};
+
+    if ($fmt eq 'qcow2') {
+        $prealloc = $prealloc // 'metadata';
+
+        die "preallocation mode '$prealloc' not supported by format '$fmt'\n"
+            if !$QCOW2_PREALLOCATION->{$prealloc};
+
+        return $prealloc;
+    } elsif ($fmt eq 'raw') {
+        $prealloc = $prealloc // 'off';
+        $prealloc = 'off' if $prealloc eq 'metadata';
+
+        die "preallocation mode '$prealloc' not supported by format '$fmt'\n"
+            if !$RAW_PREALLOCATION->{$prealloc};
+
+        return $prealloc;
+    }
+
+    return;
+}
+
 # Storage implementation
 
 # called during addition of storage (before the new storage config got written)
@@ -685,8 +728,13 @@ sub cluster_lock_storage {
 sub parse_name_dir {
     my $name = shift;
 
-    if ($name =~ m!^((base-)?[^/\s]+\.(raw|qcow2|vmdk|subvol))$!) {
-        return ($1, $3, $2); # (name, format, isBase)
+    if ($name =~ m!^((vm-|base-|subvol-)(\d+)-[^/\s]+\.(raw|qcow2|vmdk|subvol))$!) {
+        my $isbase = $2 eq 'base-' ? $2 : undef;
+        return ($1, $4, $isbase); # (name, format, isBase)
+    } elsif ($name =~ m!^snap-.*\.qcow2$!) {
+        die "'$name' is a snapshot filename, not a volume!\n";
+    } elsif ($name =~ m!^((base-)?[^/\s]+\.(raw|qcow2|vmdk|subvol))$!) {
+        return ($1, $3, $2); # (name ,format, isBase)
     }
 
     die "unable to parse volume filename '$name'\n";
@@ -761,10 +809,30 @@ sub get_subdir {
     return "$path/$subdir";
 }
 
+my sub get_snap_name {
+    my ($class, $volname, $snapname) = @_;
+    die "missing snapname\n" if !$snapname;
+
+    my ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format) =
+        $class->parse_volname($volname);
+    $name = $snapname eq 'current' ? $name : "snap-$snapname-$name";
+    return $name;
+}
+
+my sub parse_snap_name {
+    my ($filename, $volname) = @_;
+
+    if ($filename =~ m/^snap-(.*)-\Q$volname\E$/) {
+        return $1;
+    }
+}
+
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
 
     my ($vtype, $name, $vmid, undef, undef, $isBase, $format) = $class->parse_volname($volname);
+    $name = get_snap_name($class, $volname, $snapname)
+        if $scfg->{'snapshot-as-volume-chain'} && $snapname;
 
     # Note: qcow2/qed has internal snapshot, so path is always
     # the same (with or without snapshot => same file).
@@ -918,20 +986,12 @@ sub clone_image {
     # Note: we use relative paths, so we need to call chdir before qemu-img
     eval {
         local $CWD = $imagedir;
-
-        my $cmd = [
-            '/usr/bin/qemu-img',
-            'create',
-            '-b',
-            "../$basevmid/$basename",
-            '-F',
-            $format,
-            '-f',
-            'qcow2',
-            $path,
-        ];
-
-        run_command($cmd);
+        my $options = {
+            preallocation => preallocation_cmd_opt($scfg, $format),
+        };
+        PVE::Storage::Common::qemu_img_create_qcow2_backed(
+            $path, "../$basevmid/$basename", $format, $options,
+        );
     };
     my $err = $@;
 
@@ -985,6 +1045,28 @@ sub clone_image_pxvirt {
     return $newvol;
 }
 
+my sub alloc_backed_image {
+    my ($class, $storeid, $scfg, $volname, $backing_snap) = @_;
+
+    my $path = $class->path($scfg, $volname, $storeid);
+    my ($vmid, $backing_format) = ($class->parse_volname($volname))[2, 6];
+
+    my $preallocation = preallocation_cmd_opt($scfg, $backing_format);
+    my $options = {};
+    $options->{preallocation} = $preallocation if $preallocation;
+    my $backing_volname = get_snap_name($class, $volname, $backing_snap);
+    #qemu_img use relative path from base image for the backing_volname by default
+    eval {
+        PVE::Storage::Common::qemu_img_create_qcow2_backed(
+            $path, $backing_volname, $backing_format, $options,
+        );
+    };
+    if ($@) {
+        unlink $path;
+        die "$@";
+    }
+}
+
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
@@ -1014,14 +1096,10 @@ sub alloc_image {
         umask $old_umask;
         die $err if $err;
     } else {
-        my $cmd = ['/usr/bin/qemu-img', 'create'];
-
-        my $prealloc_opt = preallocation_cmd_option($scfg, $fmt);
-        push @$cmd, '-o', $prealloc_opt if defined($prealloc_opt);
-
-        push @$cmd, '-f', $fmt, $path, "${size}K";
-
-        eval { run_command($cmd, errmsg => "unable to create image"); };
+        my $preallocation = preallocation_cmd_opt($scfg, $fmt);
+        my $options = {};
+        $options->{preallocation} = $preallocation if $preallocation;
+        eval { PVE::Storage::Common::qemu_img_create($fmt, $size, $path, $options) };
         if ($@) {
             unlink $path;
             rmdir $imagedir;
@@ -1030,6 +1108,13 @@ sub alloc_image {
     }
 
     return "$vmid/$name";
+}
+
+my sub free_snap_image {
+    my ($class, $storeid, $scfg, $volname, $snap) = @_;
+
+    my $path = $class->path($scfg, $volname, $storeid, $snap);
+    unlink($path) || die "unlink '$path' failed - $!\n";
 }
 
 sub free_image {
@@ -1054,7 +1139,24 @@ sub free_image {
             return undef;
         }
 
+        my $snapshots = undef;
+        if ($scfg->{'snapshot-as-volume-chain'}) {
+            $snapshots = $class->volume_snapshot_info($scfg, $storeid, $volname);
+        }
         unlink($path) || die "unlink '$path' failed - $!\n";
+
+        # delete snapshots using a volume backing chaing layered by qcow2
+        if ($scfg->{'snapshot-as-volume-chain'}) {
+            for my $snapid (
+                sort { $snapshots->{$b}->{order} <=> $snapshots->{$a}->{order} }
+                keys %$snapshots
+            ) {
+                my $snap = $snapshots->{$snapid};
+                next if $snapid eq 'current';
+                eval { free_snap_image($class, $storeid, $scfg, $volname, $snapid); };
+                warn $@ if $@;
+            }
+        }
     }
 
     # try to cleanup directory to not clutter storage with empty $vmid dirs if
@@ -1132,26 +1234,7 @@ sub file_size_info {
             "file_size_info: '$filename': falling back to 'raw' from unknown format '$file_format'\n";
         $file_format = 'raw';
     }
-    my $cmd = ['/usr/bin/qemu-img', 'info', '--output=json', $filename];
-    push $cmd->@*, '-f', $file_format if $file_format;
-
-    my $json = '';
-    my $err_output = '';
-    eval {
-        run_command(
-            $cmd,
-            timeout => $timeout,
-            outfunc => sub { $json .= shift },
-            errfunc => sub { $err_output .= shift . "\n" },
-        );
-    };
-    warn $@ if $@;
-    if ($err_output) {
-        # if qemu did not output anything to stdout we die with stderr as an error
-        die $err_output if !$json;
-        # otherwise we warn about it and try to parse the json
-        warn $err_output;
-    }
+    my $json = PVE::Storage::Common::qemu_img_info($filename, $file_format, $timeout);
     if (!$json) {
         die "failed to query file information with qemu-img\n" if $untrusted;
         # skip decoding if there was no output, e.g. if there was a timeout.
@@ -1255,20 +1338,41 @@ sub volume_size_info {
 
 }
 
+=head3 volume_resize
+
+    $plugin->volume_resize(\%scfg, $storeid, $volname, $size, $running, $snapname);
+
+Resize a volume to the new C<$size> in bytes. The size is guaranteed to be a multiple of C<1024>.
+The implementation may pad to a larger size if required. In case of virtual machines, C<$running>
+indicates that the VM is currently running and the call will be followed by a C<block_resize> QMP
+command in QEMU. If resizing is supported natively via QEMU (for example, when using librbd), then
+the plugin should simply return if the VM is running. For containers, C<$running> will always be
+C<0>. If a snapshot name is specified via C<$snapname>, then the snapshot is the target of the
+resize operation.
+
+C<die>s in case of errors, or if the underlying storage implementation or the volume's format
+doesn't support resizing.
+
+This function should not return any value.
+
+=cut
+
 sub volume_resize {
-    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+    my ($class, $scfg, $storeid, $volname, $size, $running, $snapname) = @_;
 
     die "can't resize this image format\n" if $volname !~ m/\.(raw|qcow2)$/;
 
     return 1 if $running;
 
-    my $path = $class->filesystem_path($scfg, $volname);
+    die "resizing a snapshot is not supported for $class without 'snapshot-as-volume-chain'\n"
+        if !$scfg->{'snapshot-as-volume-chain'} && $snapname;
+
+    my $path = $class->filesystem_path($scfg, $volname, $snapname);
 
     my $format = ($class->parse_volname($volname))[6];
 
-    my $cmd = ['/usr/bin/qemu-img', 'resize', '-f', $format, $path, $size];
-
-    run_command($cmd, timeout => 10);
+    my $preallocation = preallocation_cmd_opt($scfg, $format);
+    PVE::Storage::Common::qemu_img_resize($path, $format, $size, $preallocation, 10);
 
     return undef;
 }
@@ -1276,13 +1380,33 @@ sub volume_resize {
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
-    die "can't snapshot this image format\n" if $volname !~ m/\.(qcow2|qed)$/;
+    if ($scfg->{'snapshot-as-volume-chain'}) {
 
-    my $path = $class->filesystem_path($scfg, $volname);
+        die "can't snapshot this image format\n" if $volname !~ m/\.(qcow2)$/;
 
-    my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-c', $snap, $path];
+        my $vmid = ($class->parse_volname($volname))[2];
 
-    run_command($cmd);
+        #rename volume unless qemu has already done it for us
+        $class->rename_snapshot($scfg, $storeid, $volname, 'current', $snap);
+
+        eval { alloc_backed_image($class, $storeid, $scfg, $volname, $snap) };
+        if ($@) {
+            warn "$@ \n";
+            eval { $class->rename_snapshot($scfg, $storeid, $volname, $snap, 'current'); };
+            warn $@ if $@;
+            die "can't allocate new volume $volname with $snap backing image\n";
+        }
+
+    } else {
+
+        die "can't snapshot this image format\n" if $volname !~ m/\.(qcow2|qed)$/;
+
+        my $path = $class->filesystem_path($scfg, $volname);
+
+        my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-c', $snap, $path];
+
+        run_command($cmd);
+    }
 
     return undef;
 }
@@ -1293,6 +1417,35 @@ sub volume_snapshot {
 sub volume_rollback_is_possible {
     my ($class, $scfg, $storeid, $volname, $snap, $blockers) = @_;
 
+    return 1 if !$scfg->{'snapshot-as-volume-chain'};
+
+    #technically, we could manage multibranch, we it need lot more work for snapshot delete
+    #we need to implemente block-stream from deleted snapshot to all others child branchs
+    #when online, we need to do a transaction for multiple disk when delete the last snapshot
+    #and need to merge in current running file
+
+    my $snapshots = $class->volume_snapshot_info($scfg, $storeid, $volname);
+    my $found;
+    $blockers //= []; # not guaranteed to be set by caller
+    for my $snapid (
+        sort { $snapshots->{$b}->{order} <=> $snapshots->{$a}->{order} }
+        keys %$snapshots
+    ) {
+        next if $snapid eq 'current';
+
+        if ($snapid eq $snap) {
+            $found = 1;
+        } elsif ($found) {
+            push $blockers->@*, $snapid;
+        }
+    }
+
+    die "can't rollback, snapshot '$snap' does not exist on '$volname'\n"
+        if !$found;
+
+    die "can't rollback, '$snap' is not most recent snapshot on '$volname'\n"
+        if scalar($blockers->@*) > 0;
+
     return 1;
 }
 
@@ -1301,11 +1454,22 @@ sub volume_snapshot_rollback {
 
     die "can't rollback snapshot this image format\n" if $volname !~ m/\.(qcow2|qed)$/;
 
-    my $path = $class->filesystem_path($scfg, $volname);
+    if ($scfg->{'snapshot-as-volume-chain'}) {
+        #simply delete the current snapshot and recreate it
+        eval { free_snap_image($class, $storeid, $scfg, $volname, 'current') };
+        if ($@) {
+            die "can't delete old volume $volname: $@\n";
+        }
 
-    my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-a', $snap, $path];
-
-    run_command($cmd);
+        eval { alloc_backed_image($class, $storeid, $scfg, $volname, $snap) };
+        if ($@) {
+            die "can't allocate new volume $volname: $@\n";
+        }
+    } else {
+        my $path = $class->filesystem_path($scfg, $volname);
+        my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-a', $snap, $path];
+        run_command($cmd);
+    }
 
     return undef;
 }
@@ -1315,17 +1479,98 @@ sub volume_snapshot_delete {
 
     die "can't delete snapshot for this image format\n" if $volname !~ m/\.(qcow2|qed)$/;
 
-    return 1 if $running;
+    my $cmd = "";
 
-    my $path = $class->filesystem_path($scfg, $volname);
+    if ($scfg->{'snapshot-as-volume-chain'}) {
 
-    $class->deactivate_volume($storeid, $scfg, $volname, $snap, {});
+        #qemu has already live commit|stream the snapshot, therefore we only have to drop the image itself
+        if ($running) {
+            eval { free_snap_image($class, $storeid, $scfg, $volname, $snap) };
+            if ($@) {
+                die "can't delete snapshot $snap of volume $volname: $@\n";
+            }
+            return;
+        }
 
-    my $cmd = ['/usr/bin/qemu-img', 'snapshot', '-d', $snap, $path];
+        my $snapshots = $class->volume_snapshot_info($scfg, $storeid, $volname);
+        my $snappath = $snapshots->{$snap}->{file};
+        my $snap_volname = $snapshots->{$snap}->{volname};
+        die "volume $snappath is missing" if !-e $snappath;
 
-    run_command($cmd);
+        my $parentsnap = $snapshots->{$snap}->{parent};
+        my $childsnap = $snapshots->{$snap}->{child};
+        my $childpath = $snapshots->{$childsnap}->{file};
+
+        #if first snapshot,as it should be bigger,  we merge child, and rename the snapshot to child
+        if (!$parentsnap) {
+            print "$volname: deleting snapshot '$snap' by commiting snapshot '$childsnap'\n";
+            print "running 'qemu-img commit $childpath'\n";
+            $cmd = ['/usr/bin/qemu-img', 'commit', $childpath];
+            eval { run_command($cmd) };
+            if ($@) {
+                warn
+                    "The state of $snap is now invalid. Don't try to clone or rollback it. You can only try to delete it again later\n";
+                die "error commiting $childsnap to $snap; $@\n";
+            }
+
+            print "rename $snappath to $childpath\n";
+            rename($snappath, $childpath)
+                || die "rename '$snappath' to '$childpath' failed - $!\n";
+
+        } else {
+            #we rebase the child image on the parent as new backing image
+            print
+                "$volname: deleting snapshot '$snap' by rebasing '$childsnap' on top of '$parentsnap'\n";
+            my $rel_parent_path = get_snap_name($class, $volname, $parentsnap);
+            $cmd = [
+                '/usr/bin/qemu-img',
+                'rebase',
+                '-b',
+                $rel_parent_path,
+                '-F',
+                'qcow2',
+                '-f',
+                'qcow2',
+                $childpath,
+            ];
+            print "running '" . join(' ', $cmd->@*) . "'\n";
+            eval { run_command($cmd) };
+            if ($@) {
+                #in case of abort, the state of the snap is still clean, just a little bit bigger
+                die "error rebase $childsnap from $parentsnap; $@\n";
+            }
+            #delete the old snapshot file (not part of the backing chain anymore)
+            eval { free_snap_image($class, $storeid, $scfg, $volname, $snap) };
+            if ($@) {
+                die "error delete old snapshot volume $snap_volname: $@\n";
+            }
+        }
+
+    } else {
+
+        return 1 if $running;
+
+        my $path = $class->filesystem_path($scfg, $volname);
+        $class->deactivate_volume($storeid, $scfg, $volname, $snap, {});
+
+        $cmd = ['/usr/bin/qemu-img', 'snapshot', '-d', $snap, $path];
+        run_command($cmd);
+    }
 
     return undef;
+}
+
+sub rename_snapshot {
+    my ($class, $scfg, $storeid, $volname, $source_snap, $target_snap) = @_;
+
+    my $source_snap_path = $class->filesystem_path($scfg, $volname, $source_snap);
+    my $target_snap_path = $class->filesystem_path($scfg, $volname, $target_snap);
+    print "rename $source_snap_path to $target_snap_path\n";
+
+    die "target snapshot '${target_snap}' already exists\n" if -e $target_snap_path;
+
+    rename($source_snap_path, $target_snap_path)
+        || die "rename '$source_snap_path' to '$target_snap_path' failed - $!\n";
 }
 
 sub volume_snapshot_needs_fsfreeze {
@@ -1398,8 +1643,8 @@ sub list_images {
 
     my $imagedir = $class->get_subdir($scfg, 'images');
 
-    my ($defFmt, $vaidFmts) = default_format($scfg);
-    my $fmts = join('|', @$vaidFmts);
+    my $format_info = $class->get_formats($scfg, $storeid);
+    my $fmts = join('|', sort keys $format_info->{valid}->%*);
 
     my $res = [];
 
@@ -1413,6 +1658,10 @@ sub list_images {
         my $format = $4;
 
         next if !$vollist && defined($vmid) && ($owner ne $vmid);
+
+        # skip files that are snapshots or have invalid names
+        my ($parsed_name) = eval { parse_name_dir(basename($fn)) };
+        next if !defined($parsed_name);
 
         my ($size, undef, $used, $parent, $ctime) = eval { file_size_info($fn, undef, $format); };
         if (my $err = $@) {
@@ -1596,14 +1845,119 @@ sub status {
     return ($res->{total}, $res->{avail}, $res->{used}, 1);
 }
 
-# Returns a hash with the snapshot names as keys and the following data:
-# id        - Unique id to distinguish different snapshots even if the have the same name.
-# timestamp - Creation time of the snapshot (seconds since epoch).
-# Returns an empty hash if the volume does not exist.
+=head3 volume_snapshot_info
+
+    my $snapshots = $plugin->volume_snapshot_info($scfg, $storeid, $volname);
+    my $childsnap = $snapshots->{$snap}->{child};
+    my $childpath = $snapshots->{$childsnap}->{file};
+
+Query information about snapshots for C<$volname>. The result is a hash reference with snapshot
+names as keys and additional information as values. Different information is required for supporting
+the C<snapshot-as-volume-chain> storage configuration option and for supporting replication (note
+that replication is currently limited to native ZFS plugins).
+
+For C<snapshot-as-volume-chain> support, an entry with key C<current> exists for the current state.
+Required values are:
+
+=over
+
+=item C<file>: The image filename of the external snapshot volume.
+
+=item C<volname>: The volume name of the external snapshot volume.
+
+=item C<volid>: The volume ID of the external snapshot volume.
+
+=item C<virtual-size>: The virtual size of the volume recorded by the snapshot.
+
+=item C<child>: The name of the child snapshot in the volume chain. Not set if there is no child.
+
+=item C<parent>: The name of the parent snapshot in the volume chain. Not set if there is no parent.
+
+=item C<order>: Number that determines the position in the backing chain. C<0> for the current
+image, one more for each step further back in the volume chain.
+
+=back
+
+For replication support, returns an empty hash if the volume does not exist. Required values are:
+
+=over
+
+=item C<id>: Unique identifier of the snapshot. Must be the same for the replicated instance. Must
+be different for different snapshots even if they share the same name.
+
+=item C<timestamp>: Creation time of the snapshot (seconds since epoch).
+
+=back
+
+=cut
+
 sub volume_snapshot_info {
     my ($class, $scfg, $storeid, $volname) = @_;
 
-    die "volume_snapshot_info is not implemented for $class";
+    my $get_snapname_from_path = sub {
+        my ($volname, $path) = @_;
+
+        my $name = basename($path);
+
+        if (my $snapname = parse_snap_name($name, basename($volname))) {
+            return $snapname;
+        } elsif ($name eq basename($volname)) {
+            return 'current';
+        }
+        return undef;
+    };
+
+    my $path = $class->filesystem_path($scfg, $volname);
+    my ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format) =
+        $class->parse_volname($volname);
+
+    my $json =
+        PVE::Storage::Common::qemu_img_info($path, undef, 10, $scfg->{'snapshot-as-volume-chain'});
+    die "failed to query file information with qemu-img\n" if !$json;
+    my $json_decode = eval { decode_json($json) };
+    if ($@) {
+        die "Can't decode qemu snapshot list. Invalid JSON: $@\n";
+    }
+    my $info = {};
+    my $order = 0;
+    if ($scfg->{'snapshot-as-volume-chain'}) {
+        # calling qemu_img_info() with $follow_backing_files gives an array reference
+        my $snapshots = $json_decode;
+        for my $snap (@$snapshots) {
+            my $snapfile = $snap->{filename};
+            ($snapfile) = $snapfile =~ m|^(/.*)|; # untaint
+            my $snapname = $get_snapname_from_path->($volname, $snapfile);
+            #not a proxmox snapshot
+            next if !$snapname;
+
+            my $snapvolname = get_snap_name($class, $volname, $snapname);
+            $snapvolname = "$vmid/$snapvolname";
+
+            $info->{$snapname}->{order} = $order;
+            $info->{$snapname}->{file} = $snapfile;
+            $info->{$snapname}->{volname} = "$snapvolname";
+            $info->{$snapname}->{volid} = "$storeid:$snapvolname";
+            $info->{$snapname}->{'virtual-size'} = $snap->{'virtual-size'};
+
+            my $parentfile = $snap->{'backing-filename'};
+            if ($parentfile) {
+                my $parentname = $get_snapname_from_path->($volname, $parentfile);
+                $info->{$snapname}->{parent} = $parentname;
+                $info->{$parentname}->{child} = $snapname;
+            }
+            $order++;
+        }
+    } else {
+        # calling qemu_img_info() without $follow_backing_files gives a single hash reference
+        my $snapshots = $json_decode->{snapshots};
+        for my $snap (@$snapshots) {
+            my $snapname = $snap->{name};
+            $info->{$snapname}->{timestamp} = $snap->{'date-sec'};
+
+        }
+    }
+
+    return $info;
 }
 
 sub activate_storage {
@@ -1820,6 +2174,9 @@ sub volume_export {
     my ($class, $scfg, $storeid, $fh, $volname, $format, $snapshot, $base_snapshot, $with_snapshots)
         = @_;
 
+    die "cannot export volumes together with their snapshots in $class\n"
+        if $with_snapshots && $scfg->{'snapshot-as-volume-chain'};
+
     my $err_msg = "volume export format $format not available for $class\n";
     if ($scfg->{path} && !defined($snapshot) && !defined($base_snapshot)) {
         my ($file) = $class->path($scfg, $volname, $storeid) or die $err_msg;
@@ -1981,6 +2338,12 @@ sub rename_volume {
     my ($class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname) = @_;
     die "not implemented in storage plugin '$class'\n" if $class->can('api') && $class->api() < 10;
     die "no path found\n" if !$scfg->{path};
+
+    if ($scfg->{'snapshot-as-volume-chain'}) {
+        my $snapshots = $class->volume_snapshot_info($scfg, $storeid, $source_volname);
+        die "we can't rename volume if a snapshot backed by a volume-chain exists\n"
+            if $snapshots->{current}->{parent};
+    }
 
     my (
         undef, $source_image, $source_vmid, $base_name, $base_vmid, undef, $format,

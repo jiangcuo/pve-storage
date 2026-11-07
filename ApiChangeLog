@@ -6,22 +6,66 @@ without breaking anything unaware of it.)
 
 Future changes should be documented in here.
 
-##  Version 12:
+## Version 12:
 
 * Introduce `qemu_blockdev_options()` plugin method
 
-  Proxmox VE will switch to the more modern QEMU command line option `-blockdev` replacing `-drive`
-  starting with QEMU machine version 10.0. The plugin method returns the options for the QEMU
-  block device used to open the volume. See the method's documentation in `PVE::Storage::Plugin`
-  and `$allowed_qemu_blockdev_options` in `PVE::Storage` for the allowed drivers and options.
-  The default implementation handles absolute paths, as well as `file:`, `host_device:`,
-  `iscsi(r)://`, `nbd` and `rbd:` paths returned by the `path()` method.
+  Proxmox VE will switch to the more modern QEMU command line option `-blockdev` replacing `-drive`.
+  With `-drive`, it was enough to specify a path, where special protocol paths like `iscsi://` were
+  also supported. With `-blockdev`, the data is more structured, a driver needs to be specified
+  alongside the path to an image and each driver supports driver-specific options. Most storage
+  plugins should be fine using driver `host_device` in case of a block device and `file` in case of
+  a file and no special options. See the default implemenation of the base plugin for guidance, also
+  if the plugin uses protocol paths. Implement this method for Proxmox VE 9.
+
+  See `$allowed_qemu_blockdev_options` in `PVE/Storage.pm` for currently allowed drivers and option.
+  Feel free to request allowing more drivers or options on the pve-devel mailing list based on your
+  needs.
+
+* Introduce `rename_snapshot()` plugin method
+
+  This method allow to rename a vm disk snapshot name to a different snapshot name.
 
 * Introduce `volume_qemu_snapshot_method()` plugin method
 
-  Tells qemu-server whether a snapshot of a volume used by a running VM needs to be taken by QEMU
-  ('qemu'), by the storage layer ('storage') or by both ('mixed'). The default implementation
-  returns 'qemu' for qcow2 images and 'storage' otherwise.
+  This method declares how snapshots should be handled for *running* VMs.
+
+  This should return one of the following:
+    'qemu':
+      Qemu must perform the snapshot. The storage plugin does nothing.
+    'storage':
+      The storage plugin *transparently* performs the snapshot and the running VM does not need to
+      do anything.
+    'mixed': 
+      For taking a snapshot: The storage performs an offline snapshot and qemu then has to reopen
+      the volume.
+      For removing a snapshot: One of 2 things will happen (both must be supported):
+      a) Qemu will "unhook" the snapshot by moving its data into the child snapshot, and then call
+         `volume_snapshot_delete` with `running` set, in which case the storage should delete only
+         the snapshot without touching the surrounding snapshots.
+      b) Qemu will "commit" the child snapshot to the one which is being removed, then call
+         `volume_snapshot_delete()` on the child snapshot, then call `rename_snapshot()` to move the
+         merged snapshot into place.
+      NOTE: Storages must support using "current" as a special name in `rename_snapshot()` to
+      cheaply convert a snapshot into the current disk state and back.
+
+* Introduce `get_formats()` plugin method
+
+  Get information about the supported formats and default format according to the current storage
+  configuration. The default implemenation is backwards-compatible with previous behavior and looks
+  at the definition given in the plugin data, as well as the `format` storage configuration option,
+  which can override the default format. Must be implemented when the supported formats or default
+  format depend on the storage configuration.
+
+* `volume_resize()` plugin method gained an optional `$snapname` parameter
+
+  If set, the snapshot is the target of the resize operation. Currently only used for
+  `snapshot-as-volume-chain` on LVM.
+
+* `PVE::Storage::storage_default_format()` keeps returning the list of valid formats in list
+  context for compatibility, it is now based on the `get_formats()` plugin method. New code should
+  use `resolve_format_hint()` or `get_formats()` instead. The `PVE::Storage::Plugin::default_format()`
+  helper is deprecated.
 
 ##  Version 11:
 

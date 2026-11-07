@@ -95,6 +95,7 @@ sub options {
         is_mountpoint => { optional => 1 },
         bwlimit => { optional => 1 },
         preallocation => { optional => 1 },
+        'snapshot-as-volume-chain' => { optional => 1, fixed => 1 },
     };
 }
 
@@ -312,6 +313,15 @@ sub get_import_metadata {
         warnings => $warnings,
         net => $res->{net},
     };
+}
+
+sub volume_qemu_snapshot_method {
+    my ($class, $storeid, $scfg, $volname) = @_;
+
+    my $format = ($class->parse_volname($volname))[6];
+    return 'storage' if $format ne 'qcow2';
+
+    return $scfg->{'snapshot-as-volume-chain'} ? 'mixed' : 'qemu';
 }
 
 1;

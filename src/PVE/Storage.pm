@@ -327,7 +327,7 @@ sub volume_size_info {
 }
 
 sub volume_resize {
-    my ($cfg, $volid, $size, $running) = @_;
+    my ($cfg, $volid, $size, $running, $snapname) = @_;
 
     my $padding = (1024 - $size % 1024) % 1024;
     $size = $size + $padding;
@@ -336,7 +336,7 @@ sub volume_resize {
     if ($storeid) {
         my $scfg = storage_config($cfg, $storeid);
         my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
-        return $plugin->volume_resize($scfg, $storeid, $volname, $size, $running);
+        return $plugin->volume_resize($scfg, $storeid, $volname, $size, $running, $snapname);
     } elsif ($volid =~ m|^(/.+)$| && -e $volid) {
         die "resize file/device '$volid' is not possible\n";
     } else {
@@ -404,6 +404,32 @@ sub volume_snapshot_delete {
     } else {
         die "unable to parse volume ID '$volid'\n";
     }
+}
+
+sub rename_snapshot {
+    my ($cfg, $volid, $source_snap, $target_snap) = @_;
+
+    die "no volid provided\n" if !$volid;
+    die "no source snapshot provided\n" if !$source_snap;
+    die "no target snapshot provided\n" if !$target_snap;
+
+    my ($storeid, $volname) = parse_volume_id($volid);
+
+    activate_storage($cfg, $storeid);
+
+    my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    return $plugin->cluster_lock_storage(
+        $storeid,
+        $scfg->{shared},
+        undef,
+        sub {
+            return $plugin->rename_snapshot(
+                $scfg, $storeid, $volname, $source_snap, $target_snap,
+            );
+        },
+    );
 }
 
 # check if a filesystem on top of a volume needs to flush its journal for
@@ -874,10 +900,11 @@ my $volname_for_storage = sub {
 
     my $scfg = storage_config($cfg, $storeid);
 
-    my (undef, $valid_formats) = PVE::Storage::Plugin::default_format($scfg);
-    my $format_is_valid = grep { $_ eq $format } @$valid_formats;
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    my $formats = $plugin->get_formats($scfg, $storeid);
     die "unsupported format '$format' for storage type $scfg->{type}\n"
-        if !$format_is_valid;
+        if !$formats->{valid}->{$format};
 
     (my $name_without_extension = $name) =~ s/\.$format$//;
 
@@ -1219,13 +1246,11 @@ sub vdisk_alloc {
 
     $vmid = parse_vmid($vmid);
 
-    my $defformat = PVE::Storage::Plugin::default_format($scfg);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
 
-    $fmt = $defformat if !$fmt;
+    $fmt = $plugin->get_formats($scfg, $storeid)->{default} if !$fmt;
 
     activate_storage($cfg, $storeid);
-
-    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
 
     # lock shared storage
     return $plugin->cluster_lock_storage(
@@ -1492,7 +1517,7 @@ sub deactivate_volumes {
         }
     }
 
-    die "volume deactivation failed: " . join(' ', @errlist)
+    die "volume deactivation failed: " . join(' ', @errlist) . "\n"
         if scalar(@errlist);
 }
 
@@ -1547,9 +1572,22 @@ sub storage_info {
 
         my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
         if ($includeformat) {
+            my $formats = $plugin->get_formats($scfg, $storeid);
+
+            my $supported = [];
+            for my $format (sort keys $formats->{valid}->%*) {
+                push $supported->@*, $format if $formats->{valid}->{$format};
+            }
+
+            $info->{$storeid}->{'formats'} = {
+                supported => $supported,
+                default => $formats->{default},
+            };
+
+            # FIXME: deprecated, remove with 10.0
+            $info->{$storeid}->{format} = [$formats->{valid}, $formats->{default}];
+
             my $pd = $plugin->plugindata();
-            $info->{$storeid}->{format} = $pd->{format}
-                if $pd->{format};
             $info->{$storeid}->{select_existing} = $pd->{select_existing}
                 if $pd->{select_existing};
         }
@@ -1704,12 +1742,30 @@ sub scan_iscsi {
     return PVE::Storage::ISCSIPlugin::iscsi_discovery(undef, [$portal]);
 }
 
+# In list context, also returns the list of valid formats for compatibility. Consider using
+# resolve_format_hint() or the get_formats() plugin method instead.
 sub storage_default_format {
     my ($cfg, $storeid) = @_;
 
     my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
 
-    return PVE::Storage::Plugin::default_format($scfg);
+    my $formats = $plugin->get_formats($scfg, $storeid);
+
+    return wantarray
+        ? ($formats->{default}, [sort keys $formats->{valid}->%*])
+        : $formats->{default};
+}
+
+sub resolve_format_hint {
+    my ($cfg, $storeid, $format_hint) = @_;
+
+    my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    my $formats = $plugin->get_formats($scfg, $storeid);
+    return $format_hint if $format_hint && $formats->{valid}->{$format_hint};
+    return $formats->{default};
 }
 
 sub vgroup_is_used {
