@@ -110,6 +110,23 @@ sub path {
     return ($path, $vmid, $vtype);
 }
 
+sub qemu_blockdev_options {
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
+
+    die "volume snapshot is not possible on iscsi device\n"
+        if $options->{'snapshot-name'};
+
+    my $lun = ($class->parse_volname($volname))[1];
+
+    return {
+        driver => 'iscsi',
+        transport => 'tcp',
+        portal => "$scfg->{portal}",
+        target => "$scfg->{target}",
+        lun => int($lun),
+    };
+}
+
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
 

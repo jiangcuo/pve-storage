@@ -199,6 +199,15 @@ sub run_rbd_command {
     return undef;
 }
 
+sub rbd_volume_config_set {
+    my ($scfg, $storeid, $volname, $key, $value) = @_;
+
+    my $cmd = $rbd_cmd->($scfg, $storeid, 'config', 'image', 'set', $volname, $key, $value);
+    run_rbd_command($cmd, errmsg => "rbd config image set $volname $key $value error");
+
+    return;
+}
+
 sub rbd_ls {
     my ($scfg, $storeid) = @_;
 
@@ -508,6 +517,60 @@ sub path {
     $path .= ":id=$cmd_option->{userid}:keyring=$cmd_option->{keyring}" if ($cmd_option->{keyring});
 
     return ($path, $vmid, $vtype);
+}
+
+sub qemu_blockdev_options {
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
+
+    my $cmd_option = PVE::CephConfig::ceph_connect_option($scfg, $storeid);
+    my ($name) = ($class->parse_volname($volname))[1];
+
+    if ($scfg->{krbd}) {
+        $name .= '@' . $options->{'snapshot-name'} if $options->{'snapshot-name'};
+        my $rbd_dev_path = get_rbd_dev_path($scfg, $storeid, $name);
+        return { driver => 'host_device', filename => $rbd_dev_path };
+    }
+
+    my $blockdev = {
+        driver => 'rbd',
+        pool => $scfg->{pool} ? "$scfg->{pool}" : 'rbd',
+        image => "$name",
+    };
+    $blockdev->{namespace} = "$scfg->{namespace}" if defined($scfg->{namespace});
+    $blockdev->{snapshot} = $options->{'snapshot-name'} if $options->{'snapshot-name'};
+
+    $blockdev->{conf} = $cmd_option->{ceph_conf} if $cmd_option->{ceph_conf};
+
+    if (my $monhost = $scfg->{'monhost'}) {
+        my $server = [];
+        my @mons = PVE::Tools::split_list($monhost);
+        for my $mon (@mons) {
+            my ($host, $port) = PVE::Tools::parse_host_and_port($mon);
+            $port = '3300' if !$port;
+            push @$server, { host => $host, port => $port };
+        }
+        $blockdev->{server} = $server;
+        $blockdev->{'auth-client-required'} = ["$cmd_option->{auth_supported}"];
+    }
+
+    $blockdev->{user} = "$cmd_option->{userid}" if $cmd_option->{keyring};
+
+    # SPI flash does lots of read-modify-write OPs, without writeback this gets really slow #3329
+    if ($options->{hints}->{'efi-disk'}) {
+        # Querying the value would just cost more and the 'rbd image config get' command will just
+        # fail if the config has not been set yet, so it's not even straight-forward to do so.
+        # Simply set the value (possibly again).
+        rbd_volume_config_set($scfg, $storeid, $name, 'rbd_cache_policy', 'writeback');
+    }
+
+    return $blockdev;
+}
+
+sub volume_qemu_snapshot_method {
+    my ($class, $storeid, $scfg, $volname) = @_;
+
+    return 'qemu' if !$scfg->{krbd};
+    return 'storage';
 }
 
 sub find_free_diskname {

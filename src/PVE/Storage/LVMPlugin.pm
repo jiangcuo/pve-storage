@@ -374,6 +374,16 @@ sub filesystem_path {
     return wantarray ? ($path, $vmid, $vtype) : $path;
 }
 
+sub qemu_blockdev_options {
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
+
+    my ($path) = $class->path($scfg, $volname, $storeid, $options->{'snapshot-name'});
+
+    my $blockdev = { driver => 'host_device', filename => $path };
+
+    return $blockdev;
+}
+
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
 

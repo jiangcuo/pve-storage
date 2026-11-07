@@ -205,6 +205,26 @@ sub path {
     return wantarray ? ($path, $vmid, $vtype) : $path;
 }
 
+sub qemu_blockdev_options {
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
+
+    my ($vtype, $name, $vmid, undef, undef, undef, $format) = $class->parse_volname($volname);
+
+    # QEMU is built without the native GlusterFS block driver, so access images via the FUSE mount
+    # of the volume, which is set up by activate_storage().
+    die "cannot attach only the snapshot of a '$format' image\n"
+        if $options->{'snapshot-name'} && ($format eq 'qcow2' || $format eq 'qed');
+
+    my $path;
+    if ($vtype eq 'images') {
+        $path = "$scfg->{path}/images/$vmid/$name";
+    } else {
+        ($path) = $class->path($scfg, $volname, $storeid);
+    }
+
+    return { driver => 'file', filename => $path };
+}
+
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snap) = @_;
 

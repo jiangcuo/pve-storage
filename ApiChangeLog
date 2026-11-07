@@ -6,6 +6,23 @@ without breaking anything unaware of it.)
 
 Future changes should be documented in here.
 
+##  Version 12:
+
+* Introduce `qemu_blockdev_options()` plugin method
+
+  Proxmox VE will switch to the more modern QEMU command line option `-blockdev` replacing `-drive`
+  starting with QEMU machine version 10.0. The plugin method returns the options for the QEMU
+  block device used to open the volume. See the method's documentation in `PVE::Storage::Plugin`
+  and `$allowed_qemu_blockdev_options` in `PVE::Storage` for the allowed drivers and options.
+  The default implementation handles absolute paths, as well as `file:`, `host_device:`,
+  `iscsi(r)://`, `nbd` and `rbd:` paths returned by the `path()` method.
+
+* Introduce `volume_qemu_snapshot_method()` plugin method
+
+  Tells qemu-server whether a snapshot of a volume used by a running VM needs to be taken by QEMU
+  ('qemu'), by the storage layer ('storage') or by both ('mixed'). The default implementation
+  returns 'qemu' for qcow2 images and 'storage' otherwise.
+
 ##  Version 11:
 
 * Allow declaring storage features via plugin data

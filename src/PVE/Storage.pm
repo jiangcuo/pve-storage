@@ -42,11 +42,11 @@ use PVE::Storage::BTRFSPlugin;
 use PVE::Storage::ESXiPlugin;
 
 # Storage API version. Increment it on changes in storage API interface.
-use constant APIVER => 11;
+use constant APIVER => 12;
 # Age is the number of versions we're backward compatible with.
 # This is like having 'current=APIVER' and age='APIAGE' in libtool,
 # see https://www.gnu.org/software/libtool/manual/html_node/Libtool-versioning.html
-use constant APIAGE => 2;
+use constant APIAGE => 3;
 
 our $KNOWN_EXPORT_FORMATS = ['raw+size', 'tar+size', 'qcow2+size', 'vmdk+size', 'zfs', 'btrfs'];
 
@@ -418,6 +418,21 @@ sub volume_snapshot_needs_fsfreeze {
     return $plugin->volume_snapshot_needs_fsfreeze();
 }
 
+sub volume_qemu_snapshot_method {
+    my ($cfg, $volid) = @_;
+
+    my ($storeid, $volname) = parse_volume_id($volid, 1);
+
+    if ($storeid) {
+        my $scfg = storage_config($cfg, $storeid);
+
+        my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+        return $plugin->volume_qemu_snapshot_method($storeid, $scfg, $volname);
+    }
+    return undef;
+}
+
 # check if a volume or snapshot supports a given feature
 # $feature - one of:
 #            clone - linked clone is possible
@@ -693,6 +708,97 @@ sub path_to_volume_id {
     return ('');
 }
 
+my $allowed_qemu_blockdev_options_file = {
+    filename => 1,
+    # pr-manager
+    # aio
+    # aio-max-batch
+    # locking
+    # drop-cache
+    # x-check-cache-dropped
+};
+my $allowed_qemu_blockdev_options = {
+    # alloc-track - only works in combination with stream job
+    # blkdebug - for debugging
+    # blklogwrites - for debugging
+    # blkreplay - for debugging
+    # blkverify - for debugging
+    # bochs
+    # cloop
+    # compress
+    # copy-before-write - should not be used directly by storage layer
+    # copy-on-read - should not be used directly by storage layer
+    # dmg
+    file => $allowed_qemu_blockdev_options_file,
+    # snapshot-access - should not be used directly by storage layer
+    # ftp
+    # ftps
+    # gluster - support is expected to be dropped in QEMU 10.1
+    # host_cdrom - storage layer should not access host CD-ROM drive
+    host_device => $allowed_qemu_blockdev_options_file,
+    # http
+    # https
+    # io_uring - disabled by our QEMU build config (would require CONFIG_BLKIO)
+    iscsi => {
+        transport => 1,
+        portal => 1,
+        target => 1,
+        lun => 1,
+        # user - requires 'password-secret'
+        # password-secret - requires adding a 'secret' object on the commandline in qemu-server
+        'initiator-name' => 1,
+        'header-digest' => 1,
+        timeout => 1,
+    },
+    # luks
+    nbd => {
+        server => 1,
+        export => 1,
+        # tls-creds - would require adding a 'secret' object on the commandline in qemu-server
+        # tls-hostname - requires tls-creds
+        # x-dirty-bitmap - would mean allocation information would be reported based on bitmap
+        'reconnect-delay' => 1,
+        'open-timeout' => 1,
+    },
+    # nfs - disabled by our QEMU build config
+    # null-aio - for debugging
+    # null-co - for debugging
+    # nvme
+    # nvme-io_uring - disabled by our QEMU build config (would require CONFIG_BLKIO)
+    # parallels
+    # preallocate
+    # qcow
+    # qcow2 - format node is added by qemu-server
+    # qed
+    # quorum
+    # raw - format node is added by qemu-server
+    rbd => {
+        pool => 1,
+        namespace => 1,
+        image => 1,
+        conf => 1,
+        snapshot => 1,
+        encrypt => 1,
+        user => 1,
+        'auth-client-required' => 1,
+        # key-secret would require adding a 'secret' object on the commandline in qemu-server
+        server => 1,
+    },
+    # replication
+    # pbs
+    # ssh - disabled by our QEMU build config
+    # throttle
+    # vdi
+    # vhdx
+    # virtio-blk-vfio-pci - disabled by our QEMU build config (would require CONFIG_BLKIO)
+    # virtio-blk-vhost-user - disabled by our QEMU build config (would require CONFIG_BLKIO)
+    # virtio-blk-vhost-vdpa - disabled by our QEMU build config (would require CONFIG_BLKIO)
+    # vmdk - format node is added by qemu-server
+    # vpc
+    # vvfat
+    # zeroinit - filter that should not be used directly by storage layer
+};
+
 sub path {
     my ($cfg, $volid, $snapname) = @_;
 
@@ -703,6 +809,42 @@ sub path {
     my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
     my ($path, $owner, $vtype) = $plugin->path($scfg, $volname, $storeid, $snapname);
     return wantarray ? ($path, $owner, $vtype) : $path;
+}
+
+sub qemu_blockdev_options {
+    my ($cfg, $volid, $machine_version, $options) = @_;
+
+    my ($storeid, $volname) = parse_volume_id($volid);
+
+    my $scfg = storage_config($cfg, $storeid);
+
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    my ($vtype) = $plugin->parse_volname($volname);
+    die "cannot use volume of type '$vtype' as a QEMU blockdevice\n"
+        if $vtype ne 'images' && $vtype ne 'iso' && $vtype ne 'import';
+
+    my $blockdev =
+        $plugin->qemu_blockdev_options($scfg, $storeid, $volname, $machine_version, $options);
+
+    if (my $driver = $blockdev->{driver}) {
+        my $allowed_opts = $allowed_qemu_blockdev_options->{$driver};
+        die "blockdev driver '$driver' not allowed\n" if !defined($allowed_opts);
+
+        for my $opt (keys $blockdev->%*) {
+            next if $opt eq 'driver';
+            if (!$allowed_opts->{$opt}) {
+                delete($blockdev->{$opt});
+                log_warn(
+                    "volume '$volid' - dropping block device option '$opt' set by storage plugin"
+                        . " - not currently part of allowed schema");
+            }
+        }
+    } else {
+        die "storage plugin for '$storeid' did not return a blockdev driver\n";
+    }
+
+    return $blockdev;
 }
 
 sub abs_filesystem_path {

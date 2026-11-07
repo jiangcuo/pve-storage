@@ -2006,6 +2006,217 @@ sub rename_volume {
     return "${storeid}:${base}${target_vmid}/${target_volname}";
 }
 
+my sub blockdev_options_nbd_tcp {
+    my ($host, $port, $export) = @_;
+
+    die "blockdev_options_nbd_tcp: no host" if !defined($host);
+
+    my $blockdev = {};
+
+    my $server = { type => 'inet', host => "$host" };
+    # port is also a string in QAPI, not optional, default for NBD is 10809
+    $server->{port} = defined($port) ? "$port" : "10809";
+    $blockdev = { driver => 'nbd', server => $server };
+    $blockdev->{export} = "$export" if defined($export);
+
+    return $blockdev;
+}
+
+my sub blockdev_options_nbd_unix {
+    my ($socket_path, $export) = @_;
+
+    my $blockdev = {};
+
+    my $server = { type => 'unix', path => "$socket_path" };
+    $blockdev = { driver => 'nbd', server => $server };
+    $blockdev->{export} = "$export" if defined($export);
+
+    return $blockdev;
+}
+
+=pod
+
+=head3 qemu_blockdev_options
+
+    $blockdev =
+        $plugin->qemu_blockdev_options($scfg, $storeid, $volname, $machine_version, $options)
+
+Returns a hash reference with the basic options needed to open the volume via QEMU's C<-blockdev>
+API. This at least requires a C<< $blockdev->{driver} >> and a reference to the image, e.g.
+C<< $blockdev->{filename} >> for the C<file> driver. For files, the C<file> driver can be used. For
+host block devices, the C<host_device> driver can be used. The plugin must not set options like
+C<cache> or C<aio>. Those are managed by qemu-server. See C<$allowed_qemu_blockdev_options> in the
+C<PVE/Storage.pm> module for allowed drivers and options. Feel free to request more on the pve-devel
+mailing list based on your requirements.
+
+While Perl does not have explicit types, the result will need to be converted to JSON later and
+match the QMP specification (see link above), so implicit types are important. In the return value,
+use C<JSON::true> and C<JSON::false> for booleans, C<"$value"> for strings, and C<int($value)> for
+integers.
+
+The volume is activated before the function is called.
+
+Arguments:
+
+=over
+
+=item C<$scfg>: The hash reference with the storage configuration.
+
+=item C<$storeid>: The storage ID.
+
+=item C<$volume>: The volume name.
+
+=item C<$machine_version>: The QEMU machine version for which the block device will be used. If you
+want to change drivers or change driver options, you should use this as a guard, so that only
+machines with a new enough version will use the new driver or options. Machines with an older
+version should still get the old driver and options. The version is a string
+C<${major}.${minor}+pve${pve_version}>. The pve version is used for certain downstream changes to
+machine models and should be (mostly) irrelevant for third-party plugins.
+
+=item C<$options>: A hash reference with additional options.
+
+=over
+
+=item C<< $options->{hints} >>: A hash reference with hints indicating what the volume will be used
+for. This can be safely ignored if no concrete issues are known with your plugin. For certain use
+cases, setting additional (plugin-specific) options might be very beneficial however. An example is
+setting the correct cache options for an EFI disk on RBD. The list of hints might get expanded in
+the future.
+
+=over
+
+=item C<< $options->{hints}->{'efi-disk'} >>: (optional) If set, the volume will be used as the EFI
+disk of a VM, containing its OMVF variables.
+
+=back
+
+=item C<< $options->{'snapshot-name'} >>: (optional) The snapshot name. Set when the associated snapshot should be opened rather than the
+volume itself.
+
+=back
+
+=back
+
+=cut
+
+sub qemu_blockdev_options {
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
+
+    my $blockdev = {};
+
+    my ($path) = $class->path($scfg, $volname, $storeid, $options->{'snapshot-name'});
+
+    if ($path =~ m|^/|) {
+        # For qcow2 and qed the path of a snapshot will be the same, but it's not possible to attach
+        # the snapshot alone.
+        my $format = ($class->parse_volname($volname))[6];
+        die "cannot attach only the snapshot of a '$format' image\n"
+            if $options->{'snapshot-name'}
+            && ($format eq 'qcow2' && !$scfg->{'snapshot-as-volume-chain'} || $format eq 'qed');
+
+        # The 'file' driver only works for regular files. The check below is taken from
+        # block/file-posix.c:hdev_probe_device() in QEMU. Do not bother with detecting 'host_cdrom'
+        # devices here, those are not managed by the storage layer.
+        my $st = File::stat::stat($path) or die "stat for '$path' failed - $!\n";
+        my $driver = (S_ISCHR($st->mode) || S_ISBLK($st->mode)) ? 'host_device' : 'file';
+        $blockdev = { driver => $driver, filename => $path };
+    } elsif ($path =~ m|^file:(\S+)|) {
+        $blockdev = { driver => 'file', filename => "$1" };
+    } elsif ($path =~ m|^host_device:(\S+)|) {
+        $blockdev = { driver => 'host_device', filename => "$1" };
+    } elsif ($path =~ m|^iscsi://(\S+)/(\S+)/(\d+)$|) {
+        $blockdev =
+            { driver => 'iscsi', portal => "$1", target => "$2", lun => "$3", transport => "tcp" };
+    } elsif ($path =~ m|^iser://(\S+)/(\S+)/(\d+)$|) {
+        $blockdev =
+            { driver => 'iscsi', portal => "$1", target => "$2", lun => "$3", transport => "iser" };
+    } elsif ($path =~ m|^nbd(?:\+tcp)?://(\S+?)(?::(\d+))?/(\S+)?$|) { # new style NBD TCP URI
+        $blockdev = blockdev_options_nbd_tcp($1, $2, $3);
+    } elsif ($path =~ m|^nbd(?:\+tcp)?:(\S+):(\d+)(?::exportname=(\S+))?$|) {
+        # old style NBD TCP URI
+        $blockdev = blockdev_options_nbd_tcp($1, $2, $3);
+    } elsif ($path =~ m|^nbd\+unix:///(\S+)?\?socket=(\S+)$|) { # new style NBD unix URI
+        $blockdev = blockdev_options_nbd_unix($2, $1); # note the order!
+    } elsif ($path =~ m|^nbd:unix:(\S+?)(?::exportname=(\S+))?$|) { # old style NBD unix URI
+        $blockdev = blockdev_options_nbd_unix($1, $2);
+    } elsif ($path =~ m/^rbd:(\S+)$/) {
+        my $rbd_options = $1;
+        $blockdev->{driver} = 'rbd';
+
+        #map options to key=value pair (if not key is provided, this is the image)
+        #options are seprated with : but we need to exclude \: used for ipv6 address
+        my $options = {
+            map {
+                s/\\:/:/g;
+                /^(.*?)=(.*)/ ? ($1 => $2) : (image => $_)
+            } $rbd_options =~ /(?:\\:|\[[^\]]*\]|[^:\\])+/g
+        };
+
+        $blockdev->{'auth-client-required'} = [$options->{'auth_supported'}]
+            if $options->{'auth_supported'};
+        $blockdev->{'conf'} = $options->{'conf'} if $options->{'conf'};
+        $blockdev->{'user'} = $options->{'id'} if $options->{'id'};
+
+        if ($options->{'mon_host'}) {
+            my $server = [];
+            my @mons = split(';', $options->{'mon_host'});
+            for my $mon (@mons) {
+                $mon =~ s/[\[\]]//g;
+                my ($host, $port) = PVE::Tools::parse_host_and_port($mon);
+                $port = '3300' if !$port;
+                push @$server, { host => $host, port => $port };
+            }
+            $blockdev->{server} = $server;
+        }
+
+        if ($options->{'image'} =~ m|^(\S+)/(\S+)$|) {
+            $blockdev->{pool} = $1;
+            $blockdev->{image} = $2;
+            if ($blockdev->{image} =~ m|^(\S+)/(\S+)$|) {
+                $blockdev->{namespace} = $1;
+                $blockdev->{image} = $2;
+            }
+        }
+
+        delete($options->@{qw(auth_supported conf id mon_host image)});
+
+        # Map rest directly. With -drive, it was possible to use arbitrary key-value-pairs. Like
+        # this, there will be warnings for those that are not allowed via blockdev.
+        for my $opt (keys $options->%*) {
+            $blockdev->{$opt} = $options->{$opt};
+        }
+    } else {
+        die "storage plugin doesn't implement qemu_blockdev_options() method\n";
+    }
+
+    return $blockdev;
+}
+
+=pod
+
+=head3 volume_qemu_snapshot_method
+
+    $method = $plugin->volume_qemu_snapshot_method($storeid, $scfg, $volname);
+
+Returns a string with the type of snapshot that qemu can do for a specific volume
+
+'qemu'    : Qemu must perform the snapshot. The storage plugin does nothing.
+'storage' : The storage plugin *transparently* performs the snapshot and the running VM does not
+            need to do anything.
+'mixed'   : The storage performs an offline snapshot and qemu then has to reopen the volume.
+            Qemu will either "unhook" the snapshot by moving its data into the child snapshot
+            or Qemu will "commit" the child snapshot to the one which is being removed. Both must
+            be supported.
+=cut
+
+sub volume_qemu_snapshot_method {
+    my ($class, $storeid, $scfg, $volname) = @_;
+
+    my $format = ($class->parse_volname($volname))[6];
+    return 'qemu' if $format eq 'qcow2';
+    return 'storage';
+}
+
 # Used by storage plugins for external backup providers. See PVE::BackupProvider::Plugin for the API
 # the provider needs to implement.
 #
