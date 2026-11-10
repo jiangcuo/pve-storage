@@ -12,6 +12,7 @@ use File::Basename;
 use File::Path;
 use Cwd 'abs_path';
 use Socket;
+use JSON ();
 use Time::Local qw(timelocal);
 
 use PVE::Tools qw(run_command file_read_firstline dir_glob_foreach $IPV6RE);
@@ -497,6 +498,15 @@ sub get_import_dir {
     my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
 
     return $plugin->get_subdir($scfg, 'import');
+}
+
+sub get_snippets_dir {
+    my ($cfg, $storeid) = @_;
+
+    my $scfg = storage_config($cfg, $storeid);
+    my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+    return $plugin->get_subdir($scfg, 'snippets');
 }
 
 sub get_vztmpl_dir {
@@ -2355,6 +2365,30 @@ sub get_import_metadata {
     }
 
     return $plugin->get_import_metadata($scfg, $volname, $storeid);
+}
+
+my $ISOINFO = '/usr/bin/pxvirt-isoinfo';
+
+# detect the operating system on an ISO image with pxvirt-isoinfo
+sub get_iso_info {
+    my ($cfg, $volid) = @_;
+
+    my ($vtype) = parse_volname($cfg, $volid);
+    die "'$volid' is not an ISO image\n" if $vtype ne 'iso';
+
+    die "pxvirt-isoinfo is not installed\n" if !-x $ISOINFO;
+
+    my $path = abs_filesystem_path($cfg, $volid);
+    ($path) = $path =~ m|^(/.+)$|; # untaint, also called during VM start
+
+    my $json = '';
+    run_command(
+        [$ISOINFO, $path],
+        outfunc => sub { $json .= shift },
+        timeout => 30,
+    );
+
+    return JSON::decode_json($json);
 }
 
 # dies if the content of the given path is unexpected for an ISO

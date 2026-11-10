@@ -56,6 +56,7 @@ Depends: bcache-tools,
          ${misc:Depends},
          ${perl:Depends},
 Recommends: pve-esxi-import-tools (>= 0.6.0),
+            pxvirt-isoinfo,
             zfs-zed,
 Description: Proxmox VE storage management library
  This package contains the storage management library used by Proxmox VE.

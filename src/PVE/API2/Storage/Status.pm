@@ -266,6 +266,7 @@ __PACKAGE__->register_method({
             { subdir => 'download-url' },
             { subdir => 'file-restore' },
             { subdir => 'import-metadata' },
+            { subdir => 'iso-info' },
             { subdir => 'prunebackups' },
             { subdir => 'rrd' },
             { subdir => 'rrddata' },
@@ -430,9 +431,11 @@ __PACKAGE__->register_method({
     name => 'upload',
     path => '{storage}/upload',
     method => 'POST',
-    description => "Upload templates, ISO images, OVAs, VM images and backup archives.",
+    description =>
+        "Upload templates, ISO images, OVAs, VM images, backup archives and snippets.",
     permissions => {
-        description => "You need allocation privileges for the selected content type.",
+        description => "You need allocation privileges for the selected content type."
+            . " Uploading snippets requires 'Datastore.Allocate'.",
         user => 'all',
     },
     protected => 1,
@@ -445,7 +448,7 @@ __PACKAGE__->register_method({
                 description => "Content type.",
                 type => 'string',
                 format => 'pve-storage-content',
-                enum => ['iso', 'vztmpl', 'import', 'backup'],
+                enum => ['iso', 'vztmpl', 'import', 'backup', 'snippets'],
             },
             filename => {
                 description =>
@@ -490,6 +493,9 @@ __PACKAGE__->register_method({
 
         if ($content eq 'backup') {
             $rpcenv->check($user, "/storage/$storage", ['Datastore.AllocateSpace']);
+        } elsif ($content eq 'snippets') {
+            # snippets can be used as hook scripts, so treat them like other sensitive content
+            $rpcenv->check($user, "/storage/$storage", ['Datastore.Allocate']);
         } else {
             $rpcenv->check($user, "/storage/$storage", ['Datastore.AllocateTemplate']);
         }
@@ -546,6 +552,12 @@ __PACKAGE__->register_method({
                 });
             }
             $path = PVE::Storage::get_backup_dir($cfg, $storage);
+        } elsif ($content eq 'snippets') {
+            raise_param_exc({ filename => "invalid filename" })
+                if $filename !~ m!^${PVE::Storage::SAFE_CHAR_CLASS_RE}+$! || $filename =~ m/^\./;
+            raise_param_exc({ filename => "snippets must not be larger than 1 MiB" })
+                if $size > 1024 * 1024;
+            $path = PVE::Storage::get_snippets_dir($cfg, $storage);
         } else {
             raise_param_exc({ content => "upload content type '$content' not allowed" });
         }
@@ -580,6 +592,17 @@ __PACKAGE__->register_method({
                 errmsg => "mkdir failed",
             );
 
+            if ($content eq 'snippets') {
+                # never overwrite existing snippets, they might be (executable) hook scripts
+                eval {
+                    run_command(
+                        [@remcmd, '/usr/bin/test', '!', '-e', PVE::Tools::shell_quote($dest)],
+                        quiet => 1,
+                    );
+                };
+                raise_param_exc({ filename => "snippet '$filename' already exists" }) if $@;
+            }
+
             $cmd = [
                 '/usr/bin/scp',
                 $ssh_options->@*,
@@ -593,6 +616,9 @@ __PACKAGE__->register_method({
         } else {
             PVE::Storage::activate_storage($cfg, $storage);
             File::Path::make_path($dirname);
+            # never overwrite existing snippets, they might be (executable) hook scripts
+            raise_param_exc({ filename => "snippet '$filename' already exists" })
+                if $content eq 'snippets' && -e $dest;
             $cmd = ['cp', '--', $tmpfilename, $dest];
         }
 
@@ -716,7 +742,7 @@ __PACKAGE__->register_method({
         }
 
         my ($vtype) = PVE::Storage::parse_volname($cfg, $volid);
-        my %downloadable = map { $_ => 1 } qw(backup iso vztmpl import);
+        my %downloadable = map { $_ => 1 } qw(backup iso vztmpl import snippets);
         die "downloading volumes of type '$vtype' is not supported\n"
             if !$downloadable{$vtype};
 
@@ -1035,6 +1061,98 @@ __PACKAGE__->register_method({
                 return PVE::Storage::get_import_metadata($cfg, $volid);
             },
         );
+    },
+});
+
+
+__PACKAGE__->register_method({
+    name => 'get_iso_info',
+    path => '{storage}/iso-info',
+    method => 'GET',
+    description => "Detect the operating system on an ISO image.",
+    proxyto => 'node',
+    permissions => {
+        description => "You need read access for the volume.",
+        user => 'all',
+    },
+    protected => 1,
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            storage => get_standard_option('pve-storage-id'),
+            volume => {
+                description => "Volume identifier of the ISO image.",
+                type => 'string',
+            },
+        },
+    },
+    returns => {
+        type => "object",
+        additionalProperties => 1,
+        properties => {
+            type => {
+                type => 'string',
+                enum => ['windows', 'linux', 'unknown'],
+                description => 'The type of operating system.',
+            },
+            id => {
+                type => 'string',
+                optional => 1,
+                description => 'Identifier of the detected operating system.',
+            },
+            name => {
+                type => 'string',
+                optional => 1,
+                description => 'Name of the detected operating system.',
+            },
+            version => {
+                type => 'string',
+                optional => 1,
+            },
+            arch => {
+                type => 'string',
+                optional => 1,
+            },
+            installer => {
+                type => 'string',
+                optional => 1,
+                description => 'Supported autoinstall type.',
+            },
+            ostype => {
+                type => 'string',
+                optional => 1,
+                description => 'Guest OS type.',
+            },
+            images => {
+                type => 'array',
+                optional => 1,
+                description => 'Images contained in a Windows installation medium.',
+                items => {
+                    type => 'object',
+                    additionalProperties => 1,
+                    properties => {
+                        index => { type => 'integer' },
+                        name => { type => 'string' },
+                    },
+                },
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $authuser = $rpcenv->get_user();
+
+        my ($storeid, $volume) = $param->@{qw(storage volume)};
+        my $volid = $volume =~ m/^\Q$storeid\E:/ ? $volume : "$storeid:$volume";
+
+        my $cfg = PVE::Storage::config();
+
+        PVE::Storage::check_volume_access($rpcenv, $authuser, $cfg, undef, $volid, 'iso');
+
+        return PVE::Storage::get_iso_info($cfg, $volid);
     },
 });
 
